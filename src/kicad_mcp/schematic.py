@@ -9,7 +9,14 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from .sexp_parser import SexpList, SexpNode, format_sexp, parse, parse_file, write_file
+from .sexp_parser import (
+    QuotedString,
+    SexpList,
+    escape_sexp_string as esc,
+    parse,
+    parse_file,
+    write_file,
+)
 from .types import LabelInfo, PinInfo, Point, SchematicData, SymbolInstance, WireInfo
 
 
@@ -127,8 +134,8 @@ def _ensure_lib_symbol(root: SexpList, lib_id: str) -> None:
     symbol_name = parts[1] if len(parts) == 2 else lib_id
 
     stub = parse(
-        f'(symbol "{lib_id}" (in_bom yes) (on_board yes) '
-        f'(symbol "{symbol_name}_0_1"))'
+        f'(symbol "{esc(lib_id)}" (in_bom yes) (on_board yes) '
+        f'(symbol "{esc(symbol_name)}_0_1"))'
     )
     lib_symbols.children.append(stub)
 
@@ -154,7 +161,7 @@ def _load_lib_symbol_from_disk(lib_id: str) -> SexpList | None:
             if isinstance(child, SexpList) and child.tag == "symbol":
                 if len(child.children) >= 2 and str(child.children[1]) == symbol_name:
                     # Re-tag with full lib_id for the schematic's lib_symbols block
-                    child.children[1] = lib_id
+                    child.children[1] = QuotedString(lib_id)
                     return child
     except Exception:
         pass
@@ -185,13 +192,13 @@ def place_symbol(
     pin2_uuid = _new_uuid()
 
     sym_sexp = (
-        f'(symbol (lib_id "{lib_id}") (at {x} {y} {rotation}) (unit 1) '
+        f'(symbol (lib_id "{esc(lib_id)}") (at {x} {y} {rotation}) (unit 1) '
         f'(uuid "{sym_uuid}") '
-        f'(property "Reference" "{reference}" (at {x} {y - 2} 0) '
+        f'(property "Reference" "{esc(reference)}" (at {x} {y - 2} 0) '
         f'(effects (font (size 1.27 1.27)))) '
-        f'(property "Value" "{value}" (at {x} {y + 2} 0) '
+        f'(property "Value" "{esc(value)}" (at {x} {y + 2} 0) '
         f'(effects (font (size 1.27 1.27)))) '
-        f'(property "Footprint" "{footprint}" (at {x} {y} 0) '
+        f'(property "Footprint" "{esc(footprint)}" (at {x} {y} 0) '
         f'(effects hide)) '
         f'(pin "1" (uuid "{pin1_uuid}")) '
         f'(pin "2" (uuid "{pin2_uuid}")))'
@@ -245,7 +252,7 @@ def add_label(file_path: str, name: str, x: float, y: float, rotation: float = 0
 
     lbl_uuid = _new_uuid()
     lbl_sexp = (
-        f'(label "{name}" (at {x} {y} {rotation}) (uuid "{lbl_uuid}") '
+        f'(label "{esc(name)}" (at {x} {y} {rotation}) (uuid "{lbl_uuid}") '
         f'(effects (font (size 1.27 1.27))))'
     )
     lbl_node = parse(lbl_sexp)
@@ -271,7 +278,7 @@ def add_global_label(file_path: str, name: str, x: float, y: float, rotation: fl
 
     lbl_uuid = _new_uuid()
     lbl_sexp = (
-        f'(global_label "{name}" (shape input) (at {x} {y} {rotation}) (uuid "{lbl_uuid}") '
+        f'(global_label "{esc(name)}" (shape input) (at {x} {y} {rotation}) (uuid "{lbl_uuid}") '
         f'(effects (font (size 1.27 1.27))) '
         f'(property "Intersheetrefs" "{{{{1}}}}" (at {x} {y} 0) '
         f'(effects (font (size 1.27 1.27)) hide)))'
@@ -304,11 +311,11 @@ def add_power_symbol(file_path: str, name: str, x: float, y: float, rotation: fl
     pin_uuid = _new_uuid()
 
     sym_sexp = (
-        f'(symbol (lib_id "{power_lib_id}") (at {x} {y} {rotation}) (unit 1) '
+        f'(symbol (lib_id "{esc(power_lib_id)}") (at {x} {y} {rotation}) (unit 1) '
         f'(uuid "{sym_uuid}") '
-        f'(property "Reference" "#{name}" (at {x} {y - 2} 0) '
+        f'(property "Reference" "#{esc(name)}" (at {x} {y - 2} 0) '
         f'(effects (font (size 1.27 1.27)) hide)) '
-        f'(property "Value" "{name}" (at {x} {y + 2} 0) '
+        f'(property "Value" "{esc(name)}" (at {x} {y + 2} 0) '
         f'(effects (font (size 1.27 1.27)))) '
         f'(property "Footprint" "" (at {x} {y} 0) '
         f'(effects hide)) '

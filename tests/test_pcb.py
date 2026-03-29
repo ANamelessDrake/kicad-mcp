@@ -15,6 +15,7 @@ from kicad_mcp.pcb import (
     delete_by_uuid,
     move_footprint,
     place_footprint,
+    place_footprint_array,
     read_pcb,
     set_board_outline,
 )
@@ -150,6 +151,60 @@ class TestMountingHole:
         assert uuid
         data = read_pcb(sample_pcb)
         assert len(data.footprints) == 2
+
+
+class TestPlaceFootprintArray:
+    def test_grid_array(self, tmp_dir):
+        path = os.path.join(tmp_dir, "array.kicad_pcb")
+        uuids = place_footprint_array(
+            path, "Resistor_SMD:R_0603_1608Metric", "R", "10K",
+            count=6, pattern="grid", start_x=10, start_y=10,
+            spacing_x=5, spacing_y=5, columns=3,
+        )
+        assert len(uuids) == 6
+        data = read_pcb(path)
+        assert len(data.footprints) == 6
+        refs = sorted(fp.reference for fp in data.footprints)
+        assert refs == ["R1", "R2", "R3", "R4", "R5", "R6"]
+
+    def test_grid_positions(self, tmp_dir):
+        path = os.path.join(tmp_dir, "grid.kicad_pcb")
+        place_footprint_array(
+            path, "Resistor_SMD:R_0603_1608Metric", "R", "10K",
+            count=4, pattern="grid", start_x=10, start_y=20,
+            spacing_x=5, spacing_y=10, columns=2,
+        )
+        data = read_pcb(path)
+        positions = {fp.reference: (fp.position.x, fp.position.y) for fp in data.footprints}
+        assert positions["R1"] == (10.0, 20.0)
+        assert positions["R2"] == (15.0, 20.0)
+        assert positions["R3"] == (10.0, 30.0)
+        assert positions["R4"] == (15.0, 30.0)
+
+    def test_circular_array(self, tmp_dir):
+        path = os.path.join(tmp_dir, "circle.kicad_pcb")
+        uuids = place_footprint_array(
+            path, "Resistor_SMD:R_0603_1608Metric", "R", "10K",
+            count=4, pattern="circular", start_x=50, start_y=50, radius=20,
+        )
+        assert len(uuids) == 4
+        data = read_pcb(path)
+        assert len(data.footprints) == 4
+
+    def test_invalid_pattern(self, tmp_dir):
+        path = os.path.join(tmp_dir, "bad.kicad_pcb")
+        with pytest.raises(ValueError, match="Unknown pattern"):
+            place_footprint_array(path, "X:Y", "R", "1K", count=1, pattern="spiral")
+
+    def test_start_index(self, tmp_dir):
+        path = os.path.join(tmp_dir, "idx.kicad_pcb")
+        place_footprint_array(
+            path, "Resistor_SMD:R_0603_1608Metric", "R", "10K",
+            count=3, start_index=5,
+        )
+        data = read_pcb(path)
+        refs = sorted(fp.reference for fp in data.footprints)
+        assert refs == ["R5", "R6", "R7"]
 
 
 class TestDelete:

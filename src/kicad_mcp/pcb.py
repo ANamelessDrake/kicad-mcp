@@ -6,10 +6,18 @@ by manipulating their S-expression representation.
 
 from __future__ import annotations
 
+import math
 import uuid
 from pathlib import Path
 
-from .sexp_parser import QuotedString, SexpList, parse, parse_file, write_file
+from .sexp_parser import (
+    QuotedString,
+    SexpList,
+    escape_sexp_string as esc,
+    parse,
+    parse_file,
+    write_file,
+)
 from .types import (
     FootprintInstance,
     NetInfo,
@@ -207,7 +215,7 @@ def _ensure_net(root: SexpList, net_name: str) -> int:
             max_net = max(max_net, num)
 
     new_num = max_net + 1
-    net_sexp = parse(f'(net {new_num} "{net_name}")')
+    net_sexp = parse(f'(net {new_num} "{esc(net_name)}")')
 
     # Insert after last existing net declaration
     last_net_idx = -1
@@ -239,8 +247,6 @@ def _load_footprint_from_disk(footprint_lib: str) -> SexpList | None:
 
     try:
         fp_root = parse_file(str(fp_file))
-        # The .kicad_mod file's root is already a footprint node, but tagged as "module" or "footprint"
-        # Re-tag it with the full library path
         if fp_root.tag in ("footprint", "module"):
             fp_root.children[1] = QuotedString(footprint_lib)
         return fp_root
@@ -271,7 +277,6 @@ def place_footprint(
     fp_node = _load_footprint_from_disk(footprint_lib)
     if fp_node:
         # Update the loaded footprint with our placement info
-        # Replace or add 'at' node
         at_node = fp_node.find("at")
         if at_node:
             at_node.children = ["at", x, y]
@@ -281,22 +286,18 @@ def place_footprint(
             at_sexp = parse(f"(at {x} {y}{f' {rotation}' if rotation else ''})")
             fp_node.children.insert(2, at_sexp)
 
-        # Replace or add layer
         layer_node = fp_node.find("layer")
         if layer_node:
             layer_node.children = ["layer", QuotedString(layer)]
         else:
-            layer_sexp = parse(f'(layer "{layer}")')
-            fp_node.children.insert(2, layer_sexp)
+            fp_node.children.insert(2, parse(f'(layer "{esc(layer)}")'))
 
-        # Update UUID
         uuid_node = fp_node.find("uuid")
         if uuid_node:
             uuid_node.children = ["uuid", QuotedString(fp_uuid)]
         else:
             fp_node.children.append(parse(f'(uuid "{fp_uuid}")'))
 
-        # Update properties
         for prop in fp_node.find_all("property"):
             if len(prop.children) >= 3:
                 if str(prop.children[1]) == "Reference":
@@ -307,15 +308,17 @@ def place_footprint(
         root.children.append(fp_node)
     else:
         # Fallback: create a minimal footprint stub
+        silk_layer = layer.replace("Cu", "SilkS")
+        fab_layer = layer.replace("Cu", "Fab")
         fp_sexp = (
-            f'(footprint "{footprint_lib}" (layer "{layer}") (at {x} {y}'
+            f'(footprint "{esc(footprint_lib)}" (layer "{esc(layer)}") (at {x} {y}'
             f'{f" {rotation}" if rotation else ""}) '
             f'(uuid "{fp_uuid}") '
-            f'(property "Reference" "{reference}" (at 0 -2) '
-            f'(layer "{layer.replace("Cu", "SilkS")}") '
+            f'(property "Reference" "{esc(reference)}" (at 0 -2) '
+            f'(layer "{esc(silk_layer)}") '
             f'(effects (font (size 1 1) (thickness 0.15)))) '
-            f'(property "Value" "{value}" (at 0 2) '
-            f'(layer "{layer.replace("Cu", "Fab")}") '
+            f'(property "Value" "{esc(value)}" (at 0 2) '
+            f'(layer "{esc(fab_layer)}") '
             f'(effects (font (size 1 1) (thickness 0.15)))))'
         )
         fp_node = parse(fp_sexp)
@@ -339,8 +342,6 @@ def move_footprint(
                     at_node.children = ["at", x, y]
                     if rotation is not None:
                         at_node.children.append(rotation)
-                    elif len(at_node.children) > 3:
-                        pass  # keep existing rotation
                 write_file(file_path, root)
                 return True
     return False
@@ -370,7 +371,7 @@ def add_trace(
         x2, y2 = points[i + 1]
         seg_sexp = (
             f'(segment (start {x1} {y1}) (end {x2} {y2}) (width {width}) '
-            f'(layer "{layer}") (net {net_num}) (uuid "{seg_uuid}"))'
+            f'(layer "{esc(layer)}") (net {net_num}) (uuid "{seg_uuid}"))'
         )
         root.children.append(parse(seg_sexp))
 
@@ -425,7 +426,7 @@ def add_zone(
 
     pts_str = " ".join(f"(xy {x} {y})" for x, y in outline_points)
     zone_sexp = (
-        f'(zone (net {net_num}) (net_name "{net_name}") (layer "{layer}") '
+        f'(zone (net {net_num}) (net_name "{esc(net_name)}") (layer "{esc(layer)}") '
         f'(uuid "{zone_uuid}") '
         f'(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)) '
         f'(polygon (pts {pts_str})))'
@@ -482,7 +483,7 @@ def assign_net_to_pad(file_path: str, footprint_ref: str, pad_number: str, net_n
                         if net_node:
                             net_node.children = ["net", net_num, QuotedString(net_name)]
                         else:
-                            pad.children.append(parse(f'(net {net_num} "{net_name}")'))
+                            pad.children.append(parse(f'(net {net_num} "{esc(net_name)}")'))
                         write_file(file_path, root)
                         return True
     return False
@@ -514,6 +515,90 @@ def add_mounting_hole(
 
     write_file(file_path, root)
     return fp_uuid
+
+
+def place_footprint_array(
+    file_path: str,
+    footprint_lib: str,
+    reference_prefix: str,
+    value: str,
+    count: int,
+    pattern: str = "grid",
+    start_x: float = 50.0,
+    start_y: float = 50.0,
+    spacing_x: float = 5.0,
+    spacing_y: float = 5.0,
+    columns: int | None = None,
+    radius: float = 20.0,
+    rotation: float = 0,
+    layer: str = "F.Cu",
+    start_index: int = 1,
+) -> list[str]:
+    """Place an array of identical footprints in a grid or circular pattern.
+
+    Returns list of UUIDs for all placed footprints.
+
+    Note: Each placement re-reads/writes the file. For very large arrays
+    this could be slow — acceptable for typical component counts.
+    """
+    if pattern not in ("grid", "circular"):
+        raise ValueError(f"Unknown pattern: {pattern!r}. Use 'grid' or 'circular'.")
+
+    if count < 1:
+        raise ValueError("count must be >= 1")
+
+    uuids: list[str] = []
+
+    if pattern == "grid":
+        cols = columns if columns else count  # default: single row
+        for i in range(count):
+            col = i % cols
+            row = i // cols
+            x = start_x + col * spacing_x
+            y = start_y + row * spacing_y
+            ref = f"{reference_prefix}{start_index + i}"
+            uid = place_footprint(file_path, footprint_lib, ref, value, x, y, rotation, layer)
+            uuids.append(uid)
+
+    elif pattern == "circular":
+        for i in range(count):
+            angle_rad = 2 * math.pi * i / count
+            x = start_x + radius * math.cos(angle_rad)
+            y = start_y + radius * math.sin(angle_rad)
+            fp_rotation = rotation + math.degrees(angle_rad)
+            ref = f"{reference_prefix}{start_index + i}"
+            uid = place_footprint(file_path, footprint_lib, ref, value, x, y, fp_rotation, layer)
+            uuids.append(uid)
+
+    return uuids
+
+
+def autoroute(
+    file_path: str,
+    freerouting_jar: str | None = None,
+    timeout: int = 300,
+) -> dict:
+    """Run Freerouting autorouter on a PCB file.
+
+    Exports DSN, runs Freerouting, imports SES result.
+    Returns dict with status and details.
+    """
+    import tempfile
+    from . import cli as kicad_cli
+
+    pcb_path = Path(file_path)
+    if not pcb_path.exists():
+        raise FileNotFoundError(f"PCB file not found: {file_path}")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        dsn_path = str(Path(tmp_dir) / "board.dsn")
+        ses_path = str(Path(tmp_dir) / "board.ses")
+
+        kicad_cli.export_dsn(file_path, dsn_path)
+        kicad_cli.run_freerouting(dsn_path, ses_path, freerouting_jar, timeout)
+        kicad_cli.import_ses(file_path, ses_path)
+
+    return {"status": "success", "file": file_path}
 
 
 def delete_by_uuid(file_path: str, target_uuid: str) -> bool:

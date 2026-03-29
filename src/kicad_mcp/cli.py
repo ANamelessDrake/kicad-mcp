@@ -180,3 +180,66 @@ def export_netlist(schematic_path: str, output_path: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"Netlist export failed: {result.stderr.strip()}")
     return output_path
+
+
+def export_dsn(file_path: str, output_path: str) -> str:
+    """Export PCB to Specctra DSN format for autorouting."""
+    cli = _find_kicad_cli()
+    if not cli:
+        raise RuntimeError("kicad-cli not found.")
+    cmd = [cli, "pcb", "export", "dsn", "--output", output_path, file_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"DSN export failed: {result.stderr.strip()}")
+    return output_path
+
+
+def import_ses(pcb_path: str, ses_path: str) -> str:
+    """Import Specctra SES (routed session) back into PCB."""
+    cli = _find_kicad_cli()
+    if not cli:
+        raise RuntimeError("kicad-cli not found.")
+    cmd = [cli, "pcb", "import", "specctra_ses", "--output", pcb_path, ses_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"SES import failed: {result.stderr.strip()}")
+    return pcb_path
+
+
+def run_freerouting(
+    dsn_path: str,
+    output_ses_path: str,
+    freerouting_jar: str | None = None,
+    timeout: int = 300,
+) -> str:
+    """Run the Freerouting autorouter on a DSN file."""
+    import os
+
+    jar_path = freerouting_jar or os.environ.get("FREEROUTING_JAR", "freerouting.jar")
+
+    java = shutil.which("java")
+    if not java:
+        raise RuntimeError("Java not found. Freerouting requires a Java runtime.")
+
+    if not Path(jar_path).exists():
+        raise RuntimeError(
+            f"Freerouting JAR not found at {jar_path}. "
+            "Download from https://github.com/freerouting/freerouting/releases "
+            "and set FREEROUTING_JAR env var."
+        )
+
+    cmd = [
+        java, "-jar", jar_path,
+        "-de", dsn_path,
+        "-do", output_ses_path,
+        "-mp", "20",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(f"Freerouting failed: {result.stderr.strip()}")
+
+    if not Path(output_ses_path).exists():
+        raise RuntimeError("Freerouting completed but no SES output was generated.")
+
+    return output_ses_path

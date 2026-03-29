@@ -6,11 +6,44 @@ Run with: python -m kicad_mcp.server
 from __future__ import annotations
 
 import json
+import logging
+import os
+import signal
+import sys
 from dataclasses import asdict
 
 from mcp.server.fastmcp import FastMCP
 
-from . import cli, library, pcb, schematic
+from . import cli, jlcpcb, library, pcb, schematic
+
+
+def _configure_logging() -> logging.Logger:
+    _logger = logging.getLogger("kicad_mcp")
+    level_str = os.environ.get("KICAD_MCP_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_str, logging.INFO)
+    _logger.setLevel(level)
+
+    # Log to stderr — MCP uses stdout for JSON-RPC protocol
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    _logger.addHandler(stderr_handler)
+
+    # Optional file logging
+    log_file = os.environ.get("KICAD_MCP_LOG_FILE")
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        ))
+        _logger.addHandler(file_handler)
+
+    return _logger
+
+
+logger = _configure_logging()
 
 mcp = FastMCP(
     "kicad",
@@ -28,6 +61,7 @@ def schematic_read(file_path: str) -> str:
     Returns structured JSON with components (ref, value, footprint, position, pins),
     wires, and labels.
     """
+    logger.debug("schematic_read: %s", file_path)
     data = schematic.read_schematic(file_path)
     return json.dumps(asdict(data), indent=2)
 
@@ -57,6 +91,7 @@ def schematic_place_symbol(
 
     Returns the UUID of the placed symbol.
     """
+    logger.debug("schematic_place_symbol: %s %s at (%s,%s)", lib_id, reference, x, y)
     uuid = schematic.place_symbol(file_path, lib_id, reference, value, footprint, x, y, rotation)
     return json.dumps({"uuid": uuid})
 
@@ -168,6 +203,7 @@ def pcb_read(file_path: str) -> str:
     Returns structured JSON with footprints (ref, position, rotation, layer, pad nets),
     traces, vias, zones, board outline, and net list.
     """
+    logger.debug("pcb_read: %s", file_path)
     data = pcb.read_pcb(file_path)
     return json.dumps(asdict(data), indent=2)
 
@@ -197,6 +233,7 @@ def pcb_place_footprint(
 
     Returns the UUID of the placed footprint.
     """
+    logger.debug("pcb_place_footprint: %s %s at (%s,%s)", footprint_lib, reference, x, y)
     uuid = pcb.place_footprint(file_path, footprint_lib, reference, value, x, y, rotation, layer)
     return json.dumps({"uuid": uuid})
 
@@ -346,6 +383,78 @@ def pcb_add_mounting_hole(
 
 
 @mcp.tool()
+def pcb_place_footprint_array(
+    file_path: str,
+    footprint_lib: str,
+    reference_prefix: str,
+    value: str,
+    count: int,
+    pattern: str = "grid",
+    start_x: float = 50.0,
+    start_y: float = 50.0,
+    spacing_x: float = 5.0,
+    spacing_y: float = 5.0,
+    columns: int | None = None,
+    radius: float = 20.0,
+    rotation: float = 0,
+    layer: str = "F.Cu",
+    start_index: int = 1,
+) -> str:
+    """Place an array of identical footprints in a grid or circular pattern.
+
+    Args:
+        file_path: Path to .kicad_pcb file.
+        footprint_lib: Footprint library ID (e.g., "Resistor_SMD:R_0603_1608Metric").
+        reference_prefix: Reference prefix (e.g., "R" produces R1, R2, ...).
+        value: Component value for all instances.
+        count: Number of footprints to place.
+        pattern: "grid" or "circular" (default "grid").
+        start_x: Origin X for grid, or center X for circular.
+        start_y: Origin Y for grid, or center Y for circular.
+        spacing_x: Grid X spacing in mm (grid only).
+        spacing_y: Grid Y spacing in mm (grid only).
+        columns: Grid columns before wrapping (default: single row).
+        radius: Circle radius in mm (circular only).
+        rotation: Base rotation in degrees.
+        layer: Placement layer (default "F.Cu").
+        start_index: Starting reference number (default 1).
+
+    Returns JSON with list of UUIDs.
+    """
+    logger.debug("pcb_place_footprint_array: %s x%d %s", footprint_lib, count, pattern)
+    uuids = pcb.place_footprint_array(
+        file_path, footprint_lib, reference_prefix, value, count,
+        pattern, start_x, start_y, spacing_x, spacing_y, columns,
+        radius, rotation, layer, start_index,
+    )
+    return json.dumps({"uuids": uuids, "count": len(uuids)})
+
+
+@mcp.tool()
+def pcb_autoroute(
+    file_path: str,
+    freerouting_jar: str | None = None,
+    timeout: int = 300,
+) -> str:
+    """Autoroute a PCB using Freerouting.
+
+    Exports the PCB to Specctra DSN format, runs the Freerouting autorouter,
+    and imports the routed result back. Requires Java and Freerouting JAR.
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        freerouting_jar: Path to freerouting.jar (default: FREEROUTING_JAR env var).
+        timeout: Max seconds to wait for routing (default 300).
+
+    Returns status JSON.
+    """
+    logger.info("pcb_autoroute: starting on %s", file_path)
+    result = pcb.autoroute(file_path, freerouting_jar, timeout)
+    logger.info("pcb_autoroute: completed")
+    return json.dumps(result)
+
+
+@mcp.tool()
 def pcb_run_drc(file_path: str) -> str:
     """Run Design Rules Check (DRC) on a PCB using kicad-cli.
 
@@ -447,19 +556,16 @@ def get_netlist(schematic_path: str) -> str:
     Returns the netlist XML content.
     """
     import tempfile
+    from pathlib import Path
 
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
         output_path = f.name
 
     try:
         cli.export_netlist(schematic_path, output_path)
-        from pathlib import Path
-
         content = Path(output_path).read_text()
         return content
     finally:
-        from pathlib import Path
-
         Path(output_path).unlink(missing_ok=True)
 
 
@@ -477,14 +583,13 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
 
     Returns a summary of changes made.
     """
+    from pathlib import Path
+
     from .sexp_parser import parse_file, write_file
 
     sch_data = schematic.read_schematic(schematic_path)
 
-    if not __import__("pathlib").Path(pcb_path).exists():
-        # Create new PCB with nets from schematic
-        from .sexp_parser import parse
-
+    if not Path(pcb_path).exists():
         root = pcb._make_empty_pcb()
     else:
         root = parse_file(pcb_path)
@@ -492,7 +597,6 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
     added_nets: list[str] = []
     added_fps: list[str] = []
 
-    # Ensure all unique net names exist
     net_names: set[str] = set()
     for sym in sch_data.symbols:
         if sym.value and sym.reference and not sym.reference.startswith("#"):
@@ -502,8 +606,7 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
         pcb._ensure_net(root, name)
         added_nets.append(name)
 
-    # Check which footprints are missing from the PCB
-    pcb_data = pcb.read_pcb(pcb_path) if __import__("pathlib").Path(pcb_path).exists() else pcb.PCBData()
+    pcb_data = pcb.read_pcb(pcb_path) if Path(pcb_path).exists() else pcb.PCBData()
     existing_refs = {fp.reference for fp in pcb_data.footprints}
 
     for sym in sch_data.symbols:
@@ -519,11 +622,65 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
     })
 
 
+# ── JLCPCB Tools ────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def search_jlcpcb_parts(
+    query: str,
+    category: str | None = None,
+    in_stock: bool = True,
+    limit: int = 30,
+) -> str:
+    """Search JLCPCB parts catalog. No authentication needed.
+
+    Args:
+        query: Search term (e.g., "STM32F103", "0603 resistor 10K").
+        category: Optional category filter (e.g., "Resistors").
+        in_stock: Only show in-stock parts (default True).
+        limit: Max results (default 30).
+
+    Returns JSON array of parts with LCSC number, manufacturer, package, stock, price.
+    """
+    logger.debug("search_jlcpcb_parts: %s", query)
+    parts = jlcpcb.search_parts(query, category, in_stock, limit)
+    return json.dumps([asdict(p) for p in parts], indent=2)
+
+
+@mcp.tool()
+def get_jlcpcb_part(lcsc_number: str) -> str:
+    """Get details for a specific JLCPCB part by LCSC number.
+
+    Args:
+        lcsc_number: LCSC part number (e.g., "C21190" or "21190").
+
+    Returns JSON part details or null if not found.
+    """
+    part = jlcpcb.get_part(lcsc_number)
+    return json.dumps(asdict(part) if part else None, indent=2)
+
+
+@mcp.tool()
+def list_jlcpcb_categories() -> str:
+    """List available JLCPCB part categories for filtering searches."""
+    cats = jlcpcb.list_categories()
+    return json.dumps(cats, indent=2)
+
+
 # ── Server entry point ──────────────────────────────────────────────────────
 
 
 def main() -> None:
     """Run the MCP server."""
+    def _handle_shutdown(signum: int, _frame: object) -> None:
+        sig_name = signal.Signals(signum).name
+        logger.info("Received %s, shutting down...", sig_name)
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _handle_shutdown)
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+
+    logger.info("KiCad MCP server starting (29 tools registered)")
     mcp.run()
 
 

@@ -2,7 +2,14 @@
 
 import pytest
 
-from kicad_mcp.sexp_parser import SexpList, format_sexp, parse
+from kicad_mcp.sexp_parser import (
+    QuotedString,
+    SexpList,
+    _format_atom,
+    escape_sexp_string,
+    format_sexp,
+    parse,
+)
 
 
 class TestParse:
@@ -107,3 +114,82 @@ class TestSexpListMethods:
         node = SexpList(["root"])
         other = SexpList(["other"])
         assert not node.remove_child(other)
+
+
+class TestQuotingRoundTrip:
+    """Tests for quote preservation on round-trip parse -> format -> parse."""
+
+    def test_quoted_string_survives_roundtrip(self):
+        original = '(symbol (lib_id "Device:R") (at 0 0))'
+        root = parse(original)
+        formatted = format_sexp(root)
+        assert '"Device:R"' in formatted
+        reparsed = parse(formatted)
+        assert str(reparsed.find("lib_id").children[1]) == "Device:R"
+
+    def test_bare_colon_string_gets_quoted(self):
+        """A bare str containing a colon should be quoted by _format_atom."""
+        assert _format_atom("Device:R") == '"Device:R"'
+
+    def test_bare_tag_stays_bare(self):
+        """Tags like 'symbol' should NOT be quoted."""
+        assert _format_atom("symbol") == "symbol"
+        assert _format_atom("kicad_sch") == "kicad_sch"
+        assert _format_atom("wire") == "wire"
+
+    def test_uuid_stays_quoted(self):
+        sexp = '(uuid "a0000001-aaaa-bbbb-cccc-000000000001")'
+        formatted = format_sexp(parse(sexp))
+        assert '"a0000001-aaaa-bbbb-cccc-000000000001"' in formatted
+
+    def test_generator_version_stays_quoted(self):
+        sexp = '(generator_version "8.0")'
+        formatted = format_sexp(parse(sexp))
+        assert '"8.0"' in formatted
+
+    def test_pin_number_stays_quoted(self):
+        sexp = '(pin "1" (uuid "abc"))'
+        formatted = format_sexp(parse(sexp))
+        assert '"1"' in formatted
+
+    def test_manual_assignment_with_quoted_string(self):
+        """Manually assigning QuotedString preserves quotes."""
+        root = parse('(symbol (lib_id "OldLib:OldSym"))')
+        lib_id_node = root.find("lib_id")
+        lib_id_node.children[1] = QuotedString("Device:R")
+        formatted = format_sexp(root)
+        assert '"Device:R"' in formatted
+
+    def test_manual_assignment_bare_string_colon(self):
+        """Even if someone forgets QuotedString, colon triggers quoting."""
+        root = parse('(symbol (lib_id "OldLib:OldSym"))')
+        lib_id_node = root.find("lib_id")
+        lib_id_node.children[1] = "Device:R"  # bare str — should still be quoted
+        formatted = format_sexp(root)
+        assert '"Device:R"' in formatted
+
+    def test_full_schematic_header_roundtrip(self):
+        sexp = (
+            '(kicad_sch (version 20231120) (generator "eeschema") '
+            '(generator_version "8.0") (uuid "a0000001-aaaa-bbbb-cccc-000000000001") '
+            '(paper "A3"))'
+        )
+        formatted = format_sexp(parse(sexp))
+        assert '"eeschema"' in formatted
+        assert '"8.0"' in formatted
+        assert '"a0000001-aaaa-bbbb-cccc-000000000001"' in formatted
+        assert '"A3"' in formatted
+
+
+class TestEscapeSexpString:
+    def test_escapes_quotes(self):
+        assert escape_sexp_string('say "hi"') == 'say \\"hi\\"'
+
+    def test_escapes_backslash(self):
+        assert escape_sexp_string("path\\to\\file") == "path\\\\to\\\\file"
+
+    def test_clean_string_unchanged(self):
+        assert escape_sexp_string("Device:R") == "Device:R"
+
+    def test_empty_string(self):
+        assert escape_sexp_string("") == ""

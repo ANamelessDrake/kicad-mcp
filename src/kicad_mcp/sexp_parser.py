@@ -7,7 +7,6 @@ corrupting unmodified sections.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Union
 
@@ -92,6 +91,20 @@ class SexpList:
 
 class SexpParseError(Exception):
     """Raised when S-expression parsing fails."""
+
+
+def escape_sexp_string(s: str) -> str:
+    """Escape a string for safe embedding in an S-expression f-string.
+
+    Use this when building S-expression text via f-strings with user-supplied
+    values. It escapes backslashes and double quotes so that the value is safe
+    inside a quoted S-expression token.
+
+    Example::
+
+        sexp_text = f'(name "{escape_sexp_string(user_input)}")'
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _tokenize(text: str) -> list[str]:
@@ -191,15 +204,6 @@ def parse(text: str) -> SexpList:
     return root
 
 
-def _quote_string(s: str) -> str:
-    """Quote a string for S-expression output if needed."""
-    if not s or " " in s or '"' in s or "(" in s or ")" in s or "\n" in s:
-        escaped = s.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
-    # Check if it looks like a number — if so, don't quote
-    return s
-
-
 def _is_numeric(s: str) -> bool:
     """Check if a string would be parsed as a number."""
     try:
@@ -225,8 +229,10 @@ def _format_atom(atom: Atom) -> str:
         # to remain quoted strings, not bare integers
         if _is_numeric(atom):
             return f'"{atom}"'
-        # Quote if empty or contains special characters
-        if not atom or " " in atom or '"' in atom or "(" in atom or ")" in atom or "\n" in atom:
+        # Quote if empty or contains special characters.
+        # Colons are included because library refs like "Device:R" must be quoted;
+        # KiCad tags (kicad_sch, symbol, wire, etc.) never contain colons.
+        if not atom or any(c in atom for c in ' "():\n\\'):
             escaped = atom.replace("\\", "\\\\").replace('"', '\\"')
             return f'"{escaped}"'
         return atom
@@ -276,7 +282,7 @@ def format_sexp(node: SexpNode, indent: int = 0, max_depth: int = 2) -> str:
     prefix_parts: list[str] = []
     sublist_entries: list[SexpNode] = []
     for child in node.children:
-        if isinstance(child, SexpList) and sublist_entries or isinstance(child, SexpList):
+        if isinstance(child, SexpList):
             sublist_entries.append(child)
         else:
             if sublist_entries:
