@@ -200,6 +200,20 @@ def _quote_string(s: str) -> str:
     return s
 
 
+def _is_numeric(s: str) -> bool:
+    """Check if a string would be parsed as a number."""
+    try:
+        int(s)
+        return True
+    except ValueError:
+        pass
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
 def _format_atom(atom: Atom) -> str:
     """Format an atom for output."""
     if isinstance(atom, QuotedString):
@@ -207,7 +221,11 @@ def _format_atom(atom: Atom) -> str:
         escaped = str(atom).replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
     elif isinstance(atom, str):
-        # Bare symbol — only quote if it contains special characters
+        # Quote strings that look numeric — KiCad requires pin numbers etc.
+        # to remain quoted strings, not bare integers
+        if _is_numeric(atom):
+            return f'"{atom}"'
+        # Quote if empty or contains special characters
         if not atom or " " in atom or '"' in atom or "(" in atom or ")" in atom or "\n" in atom:
             escaped = atom.replace("\\", "\\\\").replace('"', '\\"')
             return f'"{escaped}"'

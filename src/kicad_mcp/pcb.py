@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from .sexp_parser import SexpList, parse, parse_file, write_file
+from .sexp_parser import QuotedString, SexpList, parse, parse_file, write_file
 from .types import (
     FootprintInstance,
     NetInfo,
@@ -242,7 +242,7 @@ def _load_footprint_from_disk(footprint_lib: str) -> SexpList | None:
         # The .kicad_mod file's root is already a footprint node, but tagged as "module" or "footprint"
         # Re-tag it with the full library path
         if fp_root.tag in ("footprint", "module"):
-            fp_root.children[1] = footprint_lib
+            fp_root.children[1] = QuotedString(footprint_lib)
         return fp_root
     except Exception:
         return None
@@ -284,7 +284,7 @@ def place_footprint(
         # Replace or add layer
         layer_node = fp_node.find("layer")
         if layer_node:
-            layer_node.children = ["layer", layer]
+            layer_node.children = ["layer", QuotedString(layer)]
         else:
             layer_sexp = parse(f'(layer "{layer}")')
             fp_node.children.insert(2, layer_sexp)
@@ -292,7 +292,7 @@ def place_footprint(
         # Update UUID
         uuid_node = fp_node.find("uuid")
         if uuid_node:
-            uuid_node.children = ["uuid", fp_uuid]
+            uuid_node.children = ["uuid", QuotedString(fp_uuid)]
         else:
             fp_node.children.append(parse(f'(uuid "{fp_uuid}")'))
 
@@ -300,9 +300,9 @@ def place_footprint(
         for prop in fp_node.find_all("property"):
             if len(prop.children) >= 3:
                 if str(prop.children[1]) == "Reference":
-                    prop.children[2] = reference
+                    prop.children[2] = QuotedString(reference)
                 elif str(prop.children[1]) == "Value":
-                    prop.children[2] = value
+                    prop.children[2] = QuotedString(value)
 
         root.children.append(fp_node)
     else:
@@ -480,7 +480,7 @@ def assign_net_to_pad(file_path: str, footprint_ref: str, pad_number: str, net_n
                     if len(pad.children) >= 2 and str(pad.children[1]) == pad_number:
                         net_node = pad.find("net")
                         if net_node:
-                            net_node.children = ["net", net_num, net_name]
+                            net_node.children = ["net", net_num, QuotedString(net_name)]
                         else:
                             pad.children.append(parse(f'(net {net_num} "{net_name}")'))
                         write_file(file_path, root)
