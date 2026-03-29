@@ -14,7 +14,7 @@ from . import cli, library, pcb, schematic
 
 mcp = FastMCP(
     "kicad",
-    description="KiCad 8 schematic and PCB design tools",
+    instructions="KiCad 8 schematic and PCB design tools",
 )
 
 

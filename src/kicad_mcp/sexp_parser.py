@@ -14,6 +14,16 @@ from typing import Union
 
 # A parsed S-expression node is either a SexpList (parenthesized group)
 # or an atom (string/number token).
+
+
+class QuotedString(str):
+    """A string that was originally quoted in the S-expression source.
+
+    Preserves quoting information so the formatter can reproduce
+    the original quoting style on round-trip.
+    """
+
+
 Atom = Union[str, int, float]
 SexpNode = Union["SexpList", Atom]
 
@@ -127,10 +137,10 @@ def _tokenize(text: str) -> list[str]:
 def _parse_atom(token: str) -> Atom:
     """Convert a token string to an atom (int, float, or str)."""
     if token.startswith('"') and token.endswith('"'):
-        # Quoted string — unescape
+        # Quoted string — unescape and mark as originally quoted
         inner = token[1:-1]
         inner = inner.replace('\\"', '"').replace("\\\\", "\\")
-        return inner
+        return QuotedString(inner)
 
     # Try integer
     try:
@@ -192,12 +202,16 @@ def _quote_string(s: str) -> str:
 
 def _format_atom(atom: Atom) -> str:
     """Format an atom for output."""
-    if isinstance(atom, str):
-        # Always quote strings that were originally quoted or contain special chars
-        # For KiCad compatibility, quote strings that aren't simple identifiers
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_.+\-:*]*$", atom):
-            return atom
-        return _quote_string(atom)
+    if isinstance(atom, QuotedString):
+        # Always re-quote strings that were originally quoted
+        escaped = str(atom).replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    elif isinstance(atom, str):
+        # Bare symbol — only quote if it contains special characters
+        if not atom or " " in atom or '"' in atom or "(" in atom or ")" in atom or "\n" in atom:
+            escaped = atom.replace("\\", "\\\\").replace('"', '\\"')
+            return f'"{escaped}"'
+        return atom
     elif isinstance(atom, float):
         # KiCad uses specific float formatting
         if atom == int(atom):
@@ -208,51 +222,58 @@ def _format_atom(atom: Atom) -> str:
     return str(atom)
 
 
-def format_sexp(node: SexpNode, indent: int = 0, compact: bool = False) -> str:
+def _format_compact(node: SexpNode) -> str:
+    """Format a node entirely on one line (no line breaks)."""
+    if not isinstance(node, SexpList):
+        return _format_atom(node)
+    parts = [_format_compact(child) for child in node.children]
+    return "(" + " ".join(parts) + ")"
+
+
+def format_sexp(node: SexpNode, indent: int = 0, max_depth: int = 2) -> str:
     """Format a SexpNode tree back into S-expression text.
+
+    Only expands nodes across multiple lines at the top levels (up to max_depth).
+    Deeper nodes are kept on a single line to avoid formatting issues with KiCad's
+    parser, which is sensitive to how atoms and sublists are split across lines.
 
     Args:
         node: The node to format.
         indent: Current indentation level.
-        compact: If True, output on a single line (used for simple nodes).
+        max_depth: Maximum depth at which to expand across multiple lines.
     """
     if not isinstance(node, SexpList):
         return _format_atom(node)
 
-    tag = node.tag
-    children_strs: list[str] = []
-    for child in node.children:
-        if isinstance(child, SexpList):
-            children_strs.append(format_sexp(child, indent + 1))
-        else:
-            children_strs.append(_format_atom(child))
+    # Beyond max_depth, always compact
+    if indent >= max_depth:
+        return _format_compact(node)
 
-    # Decide formatting strategy
-    has_sublists = any(isinstance(c, SexpList) for c in node.children)
+    # Try compact first — if short enough, use it
+    compact = _format_compact(node)
+    if len(compact) < 120:
+        return compact
 
-    # Simple nodes (no sub-lists, short) go on one line
-    if not has_sublists:
-        one_line = "(" + " ".join(children_strs) + ")"
-        if len(one_line) < 120 or compact:
-            return one_line
-
-    # For nodes with sublists, put the tag + atoms on the first line,
-    # and sublists on subsequent indented lines
+    # Expand: tag + leading atoms on first line, sublists on indented lines
     prefix_parts: list[str] = []
-    sublist_parts: list[str] = []
-    for i, child in enumerate(node.children):
-        if isinstance(child, SexpList):
-            sublist_parts.append(format_sexp(child, indent + 1))
+    sublist_entries: list[SexpNode] = []
+    for child in node.children:
+        if isinstance(child, SexpList) and sublist_entries or isinstance(child, SexpList):
+            sublist_entries.append(child)
         else:
-            prefix_parts.append(_format_atom(child))
+            if sublist_entries:
+                # Atom after a sublist — treat as sublist entry too
+                sublist_entries.append(child)
+            else:
+                prefix_parts.append(_format_atom(child))
 
-    if not sublist_parts:
-        return "(" + " ".join(prefix_parts) + ")"
+    if not sublist_entries:
+        return compact
 
     indent_str = "  " * (indent + 1)
     lines = ["(" + " ".join(prefix_parts)]
-    for part in sublist_parts:
-        lines.append(indent_str + part)
+    for entry in sublist_entries:
+        lines.append(indent_str + format_sexp(entry, indent + 1, max_depth))
     lines.append("  " * indent + ")")
     return "\n".join(lines)
 
