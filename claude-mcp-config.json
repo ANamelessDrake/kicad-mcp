@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "kicad": {
+      "command": "python",
+      "args": ["-m", "kicad_mcp.server"],
+      "env": {
+        "KICAD_SYMBOL_DIR": "/usr/share/kicad/symbols",
+        "KICAD_FOOTPRINT_DIR": "/usr/share/kicad/footprints",
+        "KICAD_3DMODEL_DIR": "/usr/share/kicad/3dmodels"
+      }
+    }
+  }
+}
