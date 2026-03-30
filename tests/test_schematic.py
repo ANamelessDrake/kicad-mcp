@@ -82,6 +82,28 @@ class TestAddWire:
         data = read_schematic(sample_sch)
         assert len(data.wires) == 2
 
+    def test_multi_point_splits_into_segments(self, sample_sch):
+        uuid = add_wire(sample_sch, [(10, 10), (20, 10), (20, 20)])
+        assert uuid
+        data = read_schematic(sample_sch)
+        # 1 original + 2 new segments
+        assert len(data.wires) == 3
+
+    def test_zero_length_skipped(self, sample_sch):
+        uuid = add_wire(sample_sch, [(10, 10), (10, 10), (20, 10)])
+        assert uuid
+        data = read_schematic(sample_sch)
+        # 1 original + 1 new (the zero-length one was skipped)
+        assert len(data.wires) == 2
+
+    def test_all_zero_length_raises(self, sample_sch):
+        with pytest.raises(ValueError, match="zero-length"):
+            add_wire(sample_sch, [(10, 10), (10, 10)])
+
+    def test_too_few_points_raises(self, sample_sch):
+        with pytest.raises(ValueError, match="at least 2"):
+            add_wire(sample_sch, [(10, 10)])
+
 
 class TestAddLabel:
     def test_add_label(self, sample_sch):

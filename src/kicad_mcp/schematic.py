@@ -219,27 +219,45 @@ def place_symbol(
 
 
 def add_wire(file_path: str, points: list[tuple[float, float]]) -> str:
-    """Add a wire to the schematic. Returns the UUID."""
+    """Add a wire to the schematic. Returns the UUID of the last segment.
+
+    KiCad wires are always 2-point segments, so a multi-point path is split
+    into consecutive 2-point wires. Zero-length segments are rejected.
+    """
+    if len(points) < 2:
+        raise ValueError("A wire requires at least 2 points.")
+
     path = Path(file_path)
     if path.exists():
         root = parse_file(file_path)
     else:
         root = _make_empty_schematic()
 
-    wire_uuid = _new_uuid()
-    pts_str = " ".join(f"(xy {x} {y})" for x, y in points)
-    wire_sexp = f'(wire (pts {pts_str}) (uuid "{wire_uuid}"))'
-    wire_node = parse(wire_sexp)
-
     si = root.find("symbol_instances")
-    if si:
-        idx = root.children.index(si)
-        root.children.insert(idx, wire_node)
-    else:
-        root.children.append(wire_node)
+
+    last_uuid = ""
+    for i in range(len(points) - 1):
+        x1, y1 = points[i]
+        x2, y2 = points[i + 1]
+        if x1 == x2 and y1 == y2:
+            continue  # skip zero-length segments
+
+        wire_uuid = _new_uuid()
+        last_uuid = wire_uuid
+        wire_sexp = f'(wire (pts (xy {x1} {y1}) (xy {x2} {y2})) (uuid "{wire_uuid}"))'
+        wire_node = parse(wire_sexp)
+
+        if si:
+            idx = root.children.index(si)
+            root.children.insert(idx, wire_node)
+        else:
+            root.children.append(wire_node)
+
+    if not last_uuid:
+        raise ValueError("All wire segments were zero-length.")
 
     write_file(file_path, root)
-    return wire_uuid
+    return last_uuid
 
 
 def add_label(file_path: str, name: str, x: float, y: float, rotation: float = 0) -> str:
