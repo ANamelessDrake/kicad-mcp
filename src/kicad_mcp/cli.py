@@ -191,13 +191,19 @@ def export_gerbers(file_path: str, output_dir: str) -> list[str]:
     return sorted(str(p) for p in Path(output_dir).iterdir() if p.is_file())
 
 
-def export_netlist(schematic_path: str, output_path: str) -> str:
-    """Export netlist from schematic using kicad-cli."""
+def export_netlist(
+    schematic_path: str, output_path: str, fmt: str = "kicadsexpr"
+) -> str:
+    """Export netlist from schematic using kicad-cli.
+
+    Args:
+        fmt: Netlist format — "kicadsexpr" (default) or "kicadxml".
+    """
     cli = _find_kicad_cli()
     if not cli:
         raise RuntimeError("kicad-cli not found.")
 
-    cmd = [cli, "sch", "export", "netlist", "--output", output_path, schematic_path]
+    cmd = [cli, "sch", "export", "netlist", "--format", fmt, "--output", output_path, schematic_path]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"Netlist export failed: {result.stderr.strip()}")

@@ -724,53 +724,52 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
     Returns a summary of changes made.
     """
     import tempfile
+    import xml.etree.ElementTree as ET
     from pathlib import Path
 
     from .sexp_parser import parse_file, write_file
 
     logger.info("sync_schematic_to_pcb: %s -> %s", schematic_path, pcb_path)
 
-    # Export netlist (S-expression format) from schematic
     components: list[dict] = []  # {ref, value, footprint}
-    # pin_nets maps (ref, pin_number) -> net_name
-    pin_nets: dict[tuple[str, str], str] = {}
+    pin_nets: dict[tuple[str, str], str] = {}  # (ref, pin) -> net_name
     net_names: set[str] = set()
 
     try:
-        with tempfile.NamedTemporaryFile(suffix=".net", delete=False) as f:
+        # Use XML format — includes connected power nets (+3V3, +5V, etc.)
+        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
             netlist_path = f.name
-        cli.export_netlist(schematic_path, netlist_path)
-        netlist = parse_file(netlist_path)
+        cli.export_netlist(schematic_path, netlist_path, fmt="kicadxml")
+        tree = ET.parse(netlist_path)
+        root_xml = tree.getroot()
 
         # Extract components
-        comps_node = netlist.find("components")
-        if comps_node:
-            for comp in comps_node.find_all("comp"):
-                ref = str(comp.find_value("ref") or "")
-                if not ref or ref.startswith("#"):
-                    continue
-                value = str(comp.find_value("value") or "")
-                fp_node = comp.find("footprint")
-                fp = str(fp_node.children[1]) if fp_node and len(fp_node.children) >= 2 else ""
-                components.append({"ref": ref, "value": value, "footprint": fp})
+        for comp in root_xml.iter("comp"):
+            ref = comp.get("ref", "")
+            if not ref or ref.startswith("#"):
+                continue
+            value_el = comp.find("value")
+            fp_el = comp.find("footprint")
+            components.append({
+                "ref": ref,
+                "value": value_el.text if value_el is not None and value_el.text else "",
+                "footprint": fp_el.text if fp_el is not None and fp_el.text else "",
+            })
 
         # Extract nets with pin assignments
-        nets_node = netlist.find("nets")
-        if nets_node:
-            for net in nets_node.find_all("net"):
-                name = str(net.find_value("name") or "")
-                if not name:
-                    continue
-                net_names.add(name)
-                for node in net.find_all("node"):
-                    ref = str(node.find_value("ref") or "")
-                    pin = str(node.find_value("pin") or "")
-                    if ref and pin:
-                        pin_nets[(ref, pin)] = name
+        for net_el in root_xml.iter("net"):
+            name = net_el.get("name", "")
+            if not name:
+                continue
+            net_names.add(name)
+            for node in net_el.findall("node"):
+                ref = node.get("ref", "")
+                pin = node.get("pin", "")
+                if ref and pin:
+                    pin_nets[(ref, pin)] = name
 
         Path(netlist_path).unlink(missing_ok=True)
     except Exception as e:
-        # Fallback: read schematic directly if kicad-cli is not available
         logger.warning("kicad-cli netlist export failed (%s), falling back to schematic parse", e)
         sch_data = schematic.read_schematic(schematic_path)
         for sym in sch_data.symbols:
@@ -780,6 +779,17 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
                     "value": sym.value,
                     "footprint": sym.footprint,
                 })
+
+    # Supplement with power net names from schematic power symbols.
+    # The netlist export omits unconnected power nets (e.g., GND if no
+    # wires are connected yet), but we still want them declared in the PCB.
+    try:
+        sch_data = schematic.read_schematic(schematic_path)
+        for sym in sch_data.symbols:
+            if sym.lib_id.startswith("power:") and sym.value:
+                net_names.add(sym.value)
+    except Exception:
+        pass
 
     # Update PCB
     if not Path(pcb_path).exists():
