@@ -570,6 +570,43 @@ def pcb_place_footprint_array(
 
 
 @mcp.tool()
+def pcb_set_zone_net(file_path: str, zone_uuid: str, net_name: str) -> str:
+    """Assign a net to an existing copper zone.
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        zone_uuid: UUID of the zone to update.
+        net_name: Net name to assign (e.g., "GND").
+
+    Returns whether the zone was found and updated.
+    """
+    logger.info("pcb_set_zone_net: zone %s -> %s", zone_uuid, net_name)
+    ok = pcb.set_zone_net(file_path, zone_uuid, net_name)
+    return json.dumps({"updated": ok})
+
+
+@mcp.tool()
+def pcb_flip_footprint(
+    file_path: str, reference: str, to_layer: str = "B.Cu"
+) -> str:
+    """Flip a footprint to the opposite side of the board.
+
+    Swaps all layer references (F.Cu<->B.Cu, F.Mask<->B.Mask,
+    F.Paste<->B.Paste, F.SilkS<->B.SilkS, F.Fab<->B.Fab, F.CrtYd<->B.CrtYd).
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        reference: Reference designator of the footprint to flip.
+        to_layer: Target layer (default "B.Cu").
+
+    Returns whether the footprint was found and flipped.
+    """
+    logger.info("pcb_flip_footprint: %s -> %s", reference, to_layer)
+    ok = pcb.flip_footprint(file_path, reference, to_layer)
+    return json.dumps({"flipped": ok})
+
+
+@mcp.tool()
 def pcb_autoroute(
     file_path: str,
     freerouting_jar: str | None = None,
@@ -824,11 +861,12 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
     # 3. Update pad net assignments on all footprints
     updated_pads = 0
     if pin_nets:
+        from .sexp_parser import QuotedString, escape_sexp_string as _esc, parse as _parse
+
         # Re-read the PCB after footprint additions
         root = parse_file(pcb_path)
 
         for fp_node in root.find_all("footprint"):
-            # Get the footprint's reference
             fp_ref = ""
             for prop in fp_node.find_all("property"):
                 if len(prop.children) >= 3 and str(prop.children[1]) == "Reference":
@@ -846,20 +884,17 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
                 if target_net is None:
                     continue
 
-                # Ensure the net exists and get its number
                 net_num = pcb._ensure_net(root, target_net)
 
-                # Update or add the net assignment on this pad
-                from .sexp_parser import QuotedString, parse as _parse
+                # Always set the pad net to match the netlist
                 net_node = pad_node.find("net")
                 if net_node:
-                    old_name = str(net_node.children[2]) if len(net_node.children) >= 3 else ""
-                    if old_name != target_net:
-                        net_node.children = ["net", net_num, QuotedString(target_net)]
-                        updated_pads += 1
+                    net_node.children = ["net", net_num, QuotedString(target_net)]
                 else:
-                    pad_node.children.append(_parse(f'(net {net_num} "{target_net}")'))
-                    updated_pads += 1
+                    pad_node.children.append(
+                        _parse(f'(net {net_num} "{_esc(target_net)}")')
+                    )
+                updated_pads += 1
 
         write_file(pcb_path, root)
 
@@ -930,7 +965,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (37 tools registered)")
+    logger.info("KiCad MCP server starting (39 tools registered)")
     mcp.run()
 
 

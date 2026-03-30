@@ -601,6 +601,100 @@ def autoroute(
     return {"status": "success", "file": file_path}
 
 
+def set_zone_net(file_path: str, zone_uuid: str, net_name: str) -> bool:
+    """Assign a net to an existing copper zone by UUID. Returns True if found."""
+    root = parse_file(file_path)
+    net_num = _ensure_net(root, net_name)
+
+    for zone in root.find_all("zone"):
+        uuid_node = zone.find("uuid")
+        if uuid_node and len(uuid_node.children) >= 2 and str(uuid_node.children[1]) == zone_uuid:
+            # Update (net N)
+            net_node = zone.find("net")
+            if net_node and len(net_node.children) >= 2:
+                net_node.children[1] = net_num
+            # Update (net_name "name")
+            net_name_node = zone.find("net_name")
+            if net_name_node and len(net_name_node.children) >= 2:
+                net_name_node.children[1] = QuotedString(net_name)
+            else:
+                zone.children.append(parse(f'(net_name "{esc(net_name)}")'))
+            write_file(file_path, root)
+            return True
+    return False
+
+
+# Layer flip mapping for footprints
+_LAYER_FLIP: dict[str, str] = {
+    "F.Cu": "B.Cu", "B.Cu": "F.Cu",
+    "F.Mask": "B.Mask", "B.Mask": "F.Mask",
+    "F.Paste": "B.Paste", "B.Paste": "F.Paste",
+    "F.SilkS": "B.SilkS", "B.SilkS": "F.SilkS",
+    "F.Silkscreen": "B.Silkscreen", "B.Silkscreen": "F.Silkscreen",
+    "F.Fab": "B.Fab", "B.Fab": "F.Fab",
+    "F.CrtYd": "B.CrtYd", "B.CrtYd": "F.CrtYd",
+    "F.Courtyard": "B.Courtyard", "B.Courtyard": "F.Courtyard",
+    "F.Adhes": "B.Adhes", "B.Adhes": "F.Adhes",
+    "F.Adhesive": "B.Adhesive", "B.Adhesive": "F.Adhesive",
+}
+
+
+def _flip_layer(layer_str: str) -> str:
+    """Flip a layer name from front to back or vice versa."""
+    return _LAYER_FLIP.get(layer_str, layer_str)
+
+
+def flip_footprint(file_path: str, reference: str, to_layer: str = "B.Cu") -> bool:
+    """Flip a footprint to the specified layer. Returns True if found.
+
+    Swaps all layer references (F.Cu<->B.Cu, F.Mask<->B.Mask, etc.)
+    on the footprint and all its pads, text, and graphics.
+    """
+    root = parse_file(file_path)
+
+    for fp in root.find_all("footprint"):
+        for prop in fp.find_all("property"):
+            if len(prop.children) >= 3 and str(prop.children[1]) == "Reference" and str(prop.children[2]) == reference:
+                # Determine flip direction
+                current_layer_node = fp.find("layer")
+                if not current_layer_node or len(current_layer_node.children) < 2:
+                    return False
+                current_layer = str(current_layer_node.children[1])
+
+                # If already on target layer, nothing to do
+                if current_layer == to_layer:
+                    write_file(file_path, root)
+                    return True
+
+                # Flip all layer references in the entire footprint tree
+                _flip_layers_recursive(fp)
+
+                write_file(file_path, root)
+                return True
+    return False
+
+
+def _flip_layers_recursive(node: SexpList) -> None:
+    """Recursively flip all layer references in a node tree."""
+    for i, child in enumerate(node.children):
+        if isinstance(child, SexpList):
+            if child.tag == "layer" and len(child.children) >= 2:
+                old = str(child.children[1])
+                flipped = _flip_layer(old)
+                if flipped != old:
+                    child.children[1] = QuotedString(flipped)
+            elif child.tag == "layers":
+                # Pad layers list: (layers "F.Cu" "F.Paste" "F.Mask")
+                for j in range(1, len(child.children)):
+                    if isinstance(child.children[j], (str, QuotedString)):
+                        old = str(child.children[j])
+                        flipped = _flip_layer(old)
+                        if flipped != old:
+                            child.children[j] = QuotedString(flipped)
+            else:
+                _flip_layers_recursive(child)
+
+
 def delete_by_uuid(file_path: str, target_uuid: str) -> bool:
     """Delete any PCB element by UUID. Returns True if found and deleted."""
     root = parse_file(file_path)

@@ -200,12 +200,42 @@ def _load_lib_symbol_from_disk(lib_id: str) -> SexpList | None:
 
     try:
         lib_root = parse_file(str(lib_file))
+        target = None
         for child in lib_root.children:
             if isinstance(child, SexpList) and child.tag == "symbol":
                 if len(child.children) >= 2 and str(child.children[1]) == symbol_name:
-                    # Re-tag with full lib_id for the schematic's lib_symbols block
-                    child.children[1] = QuotedString(lib_id)
-                    return child
+                    target = child
+                    break
+
+        if target is None:
+            return None
+
+        # Check if the symbol uses (extends "ParentName")
+        extends_node = target.find("extends")
+        if extends_node and len(extends_node.children) >= 2:
+            parent_name = str(extends_node.children[1])
+            # Find the parent symbol and copy its sub-symbols (pins, graphics)
+            # into the child so it's self-contained
+            for child in lib_root.children:
+                if isinstance(child, SexpList) and child.tag == "symbol":
+                    if len(child.children) >= 2 and str(child.children[1]) == parent_name:
+                        # Copy parent's sub-symbols into the target, renaming them
+                        for parent_sub in child.find_all("symbol"):
+                            if len(parent_sub.children) >= 2:
+                                parent_sub_name = str(parent_sub.children[1])
+                                # Rename e.g. "4538_1_1" -> "14528_1_1"
+                                new_sub_name = parent_sub_name.replace(
+                                    parent_name, symbol_name, 1
+                                )
+                                parent_sub.children[1] = QuotedString(new_sub_name)
+                                target.children.append(parent_sub)
+                        # Remove the extends node since we inlined the parent
+                        target.remove_child(extends_node)
+                        break
+
+        # Re-tag with full lib_id for the schematic's lib_symbols block
+        target.children[1] = QuotedString(lib_id)
+        return target
     except Exception:
         pass
     return None
