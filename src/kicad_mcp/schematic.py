@@ -24,6 +24,15 @@ def _new_uuid() -> str:
     return str(uuid.uuid4())
 
 
+def _snap_to_grid(value: float, grid: float = 1.27) -> float:
+    """Snap a coordinate to the nearest KiCad grid point.
+
+    KiCad requires exact coordinate matches for connections. The default
+    schematic grid is 1.27mm (50 mil).
+    """
+    return round(value / grid) * grid
+
+
 def _make_empty_schematic() -> SexpList:
     """Create a minimal empty schematic S-expression tree."""
     return parse(
@@ -179,6 +188,9 @@ def place_symbol(
     rotation: float = 0,
 ) -> str:
     """Place a component symbol in the schematic. Returns the UUID."""
+    x = _snap_to_grid(x)
+    y = _snap_to_grid(y)
+
     path = Path(file_path)
     if path.exists():
         root = parse_file(file_path)
@@ -227,6 +239,9 @@ def add_wire(file_path: str, points: list[tuple[float, float]]) -> str:
     if len(points) < 2:
         raise ValueError("A wire requires at least 2 points.")
 
+    # Snap all points to grid
+    points = [(_snap_to_grid(x), _snap_to_grid(y)) for x, y in points]
+
     path = Path(file_path)
     if path.exists():
         root = parse_file(file_path)
@@ -262,6 +277,8 @@ def add_wire(file_path: str, points: list[tuple[float, float]]) -> str:
 
 def add_label(file_path: str, name: str, x: float, y: float, rotation: float = 0) -> str:
     """Add a net label to the schematic. Returns the UUID."""
+    x = _snap_to_grid(x)
+    y = _snap_to_grid(y)
     path = Path(file_path)
     if path.exists():
         root = parse_file(file_path)
@@ -288,6 +305,8 @@ def add_label(file_path: str, name: str, x: float, y: float, rotation: float = 0
 
 def add_global_label(file_path: str, name: str, x: float, y: float, rotation: float = 0) -> str:
     """Add a global label to the schematic. Returns the UUID."""
+    x = _snap_to_grid(x)
+    y = _snap_to_grid(y)
     path = Path(file_path)
     if path.exists():
         root = parse_file(file_path)
@@ -316,6 +335,8 @@ def add_global_label(file_path: str, name: str, x: float, y: float, rotation: fl
 
 def add_power_symbol(file_path: str, name: str, x: float, y: float, rotation: float = 0) -> str:
     """Add a power port symbol (GND, 3V3, 5V, etc.) to the schematic. Returns the UUID."""
+    x = _snap_to_grid(x)
+    y = _snap_to_grid(y)
     path = Path(file_path)
     if path.exists():
         root = parse_file(file_path)
