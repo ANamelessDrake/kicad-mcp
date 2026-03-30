@@ -16,6 +16,23 @@ def _find_kicad_cli() -> str | None:
     return shutil.which("kicad-cli")
 
 
+def _parse_kicad_violations(report: dict) -> list[dict]:
+    """Extract violations from kicad-cli JSON report.
+
+    kicad-cli nests violations under sheets[].violations[]. Each violation
+    has a description, severity, type, and items[] with pos info.
+    """
+    violations: list[dict] = []
+    # Try top-level violations (future-proofing)
+    violations.extend(report.get("violations", []))
+    # Parse sheet-level violations (actual kicad-cli 8 format)
+    for sheet in report.get("sheets", []):
+        violations.extend(sheet.get("violations", []))
+    # Also check unconnected_items for DRC
+    violations.extend(report.get("unconnected_items", []))
+    return violations
+
+
 def run_erc(file_path: str) -> list[ERCViolation]:
     """Run ERC on a schematic using kicad-cli. Returns list of violations."""
     cli = _find_kicad_cli()
@@ -27,7 +44,8 @@ def run_erc(file_path: str) -> list[ERCViolation]:
 
     try:
         result = subprocess.run(
-            [cli, "sch", "erc", "--output", report_path, "--format", "json", file_path],
+            [cli, "sch", "erc", "--output", report_path, "--format", "json",
+             "--severity-all", file_path],
             capture_output=True,
             text=True,
             timeout=60,
@@ -35,24 +53,26 @@ def run_erc(file_path: str) -> list[ERCViolation]:
 
         violations: list[ERCViolation] = []
         report_file = Path(report_path)
-        if report_file.exists():
+        if report_file.exists() and report_file.stat().st_size > 0:
             try:
                 report = json.loads(report_file.read_text())
-                for v in report.get("violations", []):
+                for v in _parse_kicad_violations(report):
                     loc = None
-                    if "pos" in v:
-                        loc = Point(v["pos"].get("x", 0), v["pos"].get("y", 0))
+                    # Position is on the first item, not the violation itself
+                    items = v.get("items", [])
+                    if items and "pos" in items[0]:
+                        pos = items[0]["pos"]
+                        loc = Point(pos.get("x", 0), pos.get("y", 0))
                     violations.append(ERCViolation(
                         severity=v.get("severity", "error"),
                         message=v.get("description", str(v)),
                         location=loc,
                     ))
             except (json.JSONDecodeError, KeyError):
-                if result.returncode != 0:
-                    violations.append(ERCViolation(
-                        severity="error",
-                        message=f"ERC failed: {result.stderr.strip() or result.stdout.strip()}",
-                    ))
+                violations.append(ERCViolation(
+                    severity="error",
+                    message=f"ERC report parse error: {result.stderr.strip() or result.stdout.strip()}",
+                ))
         elif result.returncode != 0:
             violations.append(ERCViolation(
                 severity="error",
@@ -75,7 +95,8 @@ def run_drc(file_path: str) -> list[DRCViolation]:
 
     try:
         result = subprocess.run(
-            [cli, "pcb", "drc", "--output", report_path, "--format", "json", file_path],
+            [cli, "pcb", "drc", "--output", report_path, "--format", "json",
+             "--severity-all", "--schematic-parity", file_path],
             capture_output=True,
             text=True,
             timeout=60,
@@ -83,24 +104,25 @@ def run_drc(file_path: str) -> list[DRCViolation]:
 
         violations: list[DRCViolation] = []
         report_file = Path(report_path)
-        if report_file.exists():
+        if report_file.exists() and report_file.stat().st_size > 0:
             try:
                 report = json.loads(report_file.read_text())
-                for v in report.get("violations", []):
+                for v in _parse_kicad_violations(report):
                     loc = None
-                    if "pos" in v:
-                        loc = Point(v["pos"].get("x", 0), v["pos"].get("y", 0))
+                    items = v.get("items", [])
+                    if items and "pos" in items[0]:
+                        pos = items[0]["pos"]
+                        loc = Point(pos.get("x", 0), pos.get("y", 0))
                     violations.append(DRCViolation(
                         severity=v.get("severity", "error"),
                         message=v.get("description", str(v)),
                         location=loc,
                     ))
             except (json.JSONDecodeError, KeyError):
-                if result.returncode != 0:
-                    violations.append(DRCViolation(
-                        severity="error",
-                        message=f"DRC failed: {result.stderr.strip() or result.stdout.strip()}",
-                    ))
+                violations.append(DRCViolation(
+                    severity="error",
+                    message=f"DRC report parse error: {result.stderr.strip() or result.stdout.strip()}",
+                ))
         elif result.returncode != 0:
             violations.append(DRCViolation(
                 severity="error",
