@@ -305,6 +305,23 @@ def schematic_modify_lib_symbol_pin(
 
 
 @mcp.tool()
+def schematic_annotate(file_path: str) -> str:
+    """Assign reference designators to unannotated symbols.
+
+    Finds all symbols with '?' in their reference (e.g., R?, C?, U?), and assigns
+    sequential numbers per prefix, avoiding numbers already in use.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+
+    Returns JSON with changes made, e.g. {"changes": {"R": ["R1", "R2"], "C": ["C1"]}}.
+    """
+    logger.info("schematic_annotate: %s", file_path)
+    result = schematic.annotate(file_path)
+    return json.dumps(result)
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -695,9 +712,9 @@ def get_netlist(schematic_path: str) -> str:
 def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
     """Update PCB netlist from schematic.
 
-    Reads the schematic to extract component and net information, then
-    ensures the PCB file has matching net declarations and footprints.
-    This is a simplified version of KiCad's "Update PCB from Schematic".
+    Exports a netlist from the schematic via kicad-cli, then ensures the PCB
+    has matching net declarations and footprints for all schematic components.
+    Missing footprints are placed at (50, 50) for manual arrangement.
 
     Args:
         schematic_path: Path to the .kicad_sch file.
@@ -705,42 +722,90 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
 
     Returns a summary of changes made.
     """
+    import tempfile
+    import xml.etree.ElementTree as ET
     from pathlib import Path
 
     from .sexp_parser import parse_file, write_file
 
-    sch_data = schematic.read_schematic(schematic_path)
+    logger.info("sync_schematic_to_pcb: %s -> %s", schematic_path, pcb_path)
 
+    # Export netlist from schematic
+    net_names: set[str] = set()
+    components: list[dict] = []  # {ref, value, footprint}
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
+            netlist_path = f.name
+        cli.export_netlist(schematic_path, netlist_path)
+        tree = ET.parse(netlist_path)
+        root_xml = tree.getroot()
+
+        # Extract components from netlist XML
+        for comp in root_xml.iter("comp"):
+            ref = comp.get("ref", "")
+            if not ref or ref.startswith("#"):
+                continue
+            value_el = comp.find("value")
+            fp_el = comp.find("footprint")
+            components.append({
+                "ref": ref,
+                "value": value_el.text if value_el is not None else "",
+                "footprint": fp_el.text if fp_el is not None else "",
+            })
+
+        # Extract net names from netlist XML
+        for net in root_xml.iter("net"):
+            name = net.get("name", "")
+            if name:
+                net_names.add(name)
+
+        Path(netlist_path).unlink(missing_ok=True)
+    except Exception:
+        # Fallback: read schematic directly if kicad-cli is not available
+        logger.warning("kicad-cli netlist export failed, falling back to schematic parse")
+        sch_data = schematic.read_schematic(schematic_path)
+        for sym in sch_data.symbols:
+            if sym.reference and not sym.reference.startswith("#") and sym.footprint:
+                components.append({
+                    "ref": sym.reference,
+                    "value": sym.value,
+                    "footprint": sym.footprint,
+                })
+
+    # Update PCB
     if not Path(pcb_path).exists():
         root = pcb._make_empty_pcb()
-    else:
-        root = parse_file(pcb_path)
+        write_file(pcb_path, root)
+
+    root = parse_file(pcb_path)
 
     added_nets: list[str] = []
-    added_fps: list[str] = []
-
-    net_names: set[str] = set()
-    for sym in sch_data.symbols:
-        if sym.value and sym.reference and not sym.reference.startswith("#"):
-            net_names.add(sym.reference)
-
     for name in sorted(net_names):
         pcb._ensure_net(root, name)
         added_nets.append(name)
 
-    pcb_data = pcb.read_pcb(pcb_path) if Path(pcb_path).exists() else pcb.PCBData()
+    write_file(pcb_path, root)
+
+    # Place missing footprints
+    pcb_data = pcb.read_pcb(pcb_path)
     existing_refs = {fp.reference for fp in pcb_data.footprints}
 
-    for sym in sch_data.symbols:
-        if sym.reference not in existing_refs and sym.footprint and not sym.reference.startswith("#"):
-            pcb.place_footprint(pcb_path, sym.footprint, sym.reference, sym.value, 50, 50)
-            added_fps.append(sym.reference)
-
-    write_file(pcb_path, root)
+    added_fps: list[str] = []
+    x_offset = 50.0
+    for comp in components:
+        if comp["ref"] not in existing_refs and comp["footprint"]:
+            pcb.place_footprint(
+                pcb_path, comp["footprint"], comp["ref"], comp["value"],
+                x_offset, 50, 0, "F.Cu",
+            )
+            added_fps.append(comp["ref"])
+            x_offset += 10.0  # space them out horizontally
 
     return json.dumps({
         "added_nets": added_nets,
         "added_footprints": added_fps,
+        "total_components": len(components),
     })
 
 
@@ -802,7 +867,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (36 tools registered)")
+    logger.info("KiCad MCP server starting (37 tools registered)")
     mcp.run()
 
 

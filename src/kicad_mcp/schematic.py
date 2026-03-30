@@ -654,6 +654,66 @@ def modify_lib_symbol_pin(
     return False
 
 
+def annotate(file_path: str) -> dict:
+    """Assign reference designators to unannotated symbols (those with '?' in reference).
+
+    Finds all symbols with '?' in their reference, groups by prefix (R, C, U, etc.),
+    and assigns sequential numbers avoiding any already in use.
+
+    Returns dict with {prefix: [assigned_refs]} for all changes made.
+    """
+    import re
+
+    root = parse_file(file_path)
+
+    # Collect existing references and unannotated symbols
+    used_refs: dict[str, set[int]] = {}  # prefix -> set of used numbers
+    unannotated: list[tuple[SexpList, SexpList, str]] = []  # (symbol, ref_prop, prefix)
+
+    for sym in root.find_all("symbol"):
+        for prop in sym.find_all("property"):
+            if len(prop.children) >= 3 and str(prop.children[1]) == "Reference":
+                ref_str = str(prop.children[2])
+                # Match prefix + optional number/question mark
+                m = re.match(r"^(#?[A-Za-z]+?)(\d+)$", ref_str)
+                if m:
+                    prefix = m.group(1)
+                    num = int(m.group(2))
+                    used_refs.setdefault(prefix, set()).add(num)
+                elif "?" in ref_str:
+                    prefix = ref_str.replace("?", "")
+                    used_refs.setdefault(prefix, set())
+                    unannotated.append((sym, prop, prefix))
+
+    if not unannotated:
+        return {"changes": {}}
+
+    # Assign sequential numbers
+    changes: dict[str, list[str]] = {}
+    for sym, prop, prefix in unannotated:
+        used = used_refs[prefix]
+        num = 1
+        while num in used:
+            num += 1
+        used.add(num)
+
+        new_ref = f"{prefix}{num}"
+        prop.children[2] = QuotedString(new_ref)
+        changes.setdefault(prefix, []).append(new_ref)
+
+        # Also update the instances block if present
+        instances = sym.find("instances")
+        if instances:
+            for proj in instances.find_all("project"):
+                for path_node in proj.find_all("path"):
+                    ref_node = path_node.find("reference")
+                    if ref_node and len(ref_node.children) >= 2:
+                        ref_node.children[1] = QuotedString(new_ref)
+
+    write_file(file_path, root)
+    return {"changes": changes}
+
+
 # ── Batch operations ────────────────────────────────────────────────────────
 
 
