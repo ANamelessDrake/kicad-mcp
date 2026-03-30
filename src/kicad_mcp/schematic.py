@@ -397,6 +397,66 @@ def add_power_symbol(file_path: str, name: str, x: float, y: float, rotation: fl
 # ── Batch operations ────────────────────────────────────────────────────────
 
 
+def add_power_symbols_batch(
+    file_path: str,
+    symbols: list[dict],
+) -> list[str]:
+    """Add multiple power symbols in a single file read/write cycle.
+
+    Each dict should have: name (str), x (float), y (float),
+    and optionally rotation (float, default 0).
+    Returns list of UUIDs.
+    """
+    path = Path(file_path)
+    if path.exists():
+        root = parse_file(file_path)
+    else:
+        root = _make_empty_schematic()
+
+    project = _get_project_name(file_path)
+    sch_uuid = _get_schematic_uuid(root)
+
+    uuids: list[str] = []
+    for sym in symbols:
+        x = _snap_to_grid(sym["x"])
+        y = _snap_to_grid(sym["y"])
+        rotation = sym.get("rotation", 0)
+        name = sym["name"]
+
+        power_lib_id = f"power:{name}"
+        _ensure_lib_symbol(root, power_lib_id)
+
+        sym_uuid = _new_uuid()
+        uuids.append(sym_uuid)
+        pin_uuid = _new_uuid()
+        ref = "#PWR?"
+
+        instances = _make_instances_block(project, sch_uuid, ref)
+        sym_sexp = (
+            f'(symbol (lib_id "{esc(power_lib_id)}") (at {x} {y} {rotation}) (unit 1) '
+            f'(exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no) '
+            f'(uuid "{sym_uuid}") '
+            f'(property "Reference" "{esc(ref)}" (at {x} {y - 2} 0) '
+            f'(effects (font (size 1.27 1.27)) (hide yes))) '
+            f'(property "Value" "{esc(name)}" (at {x} {y + 2} 0) '
+            f'(effects (font (size 1.27 1.27)))) '
+            f'(property "Footprint" "" (at {x} {y} 0) '
+            f'(effects (font (size 1.27 1.27)) (hide yes))) '
+            f'(property "Datasheet" "" (at {x} {y} 0) '
+            f'(effects (font (size 1.27 1.27)) (hide yes))) '
+            f'(property "Description" "Power symbol creates a global label with name \\"{esc(name)}\\"" '
+            f'(at {x} {y} 0) '
+            f'(effects (font (size 1.27 1.27)) (hide yes))) '
+            f'(pin "1" (uuid "{pin_uuid}")) '
+            f'{instances})'
+        )
+        sym_node = parse(sym_sexp)
+        _insert_before_symbol_instances(root, sym_node)
+
+    write_file(file_path, root)
+    return uuids
+
+
 def add_labels_batch(
     file_path: str,
     labels: list[dict],

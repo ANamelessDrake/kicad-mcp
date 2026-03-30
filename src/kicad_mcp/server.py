@@ -214,6 +214,22 @@ def schematic_delete_many(file_path: str, uuids: list[str]) -> str:
 
 
 @mcp.tool()
+def schematic_add_power_symbols(file_path: str, symbols: list[dict]) -> str:
+    """Add multiple power symbols in a single operation (one file read/write cycle).
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        symbols: List of dicts, each with keys: name (str, e.g. "GND", "3V3"),
+                 x (float), y (float), and optionally rotation (float, default 0).
+
+    Returns JSON with list of UUIDs.
+    """
+    logger.info("schematic_add_power_symbols: %d symbols", len(symbols))
+    uuids = schematic.add_power_symbols_batch(file_path, symbols)
+    return json.dumps({"uuids": uuids, "count": len(uuids)})
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -711,7 +727,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (31 tools registered)")
+    logger.info("KiCad MCP server starting (32 tools registered)")
     mcp.run()
 
 
