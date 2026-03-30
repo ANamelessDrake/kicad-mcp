@@ -281,6 +281,30 @@ def schematic_add_no_connects(file_path: str, positions: list[dict]) -> str:
 
 
 @mcp.tool()
+def schematic_modify_lib_symbol_pin(
+    file_path: str, lib_id: str, pin_number: str, pin_type: str
+) -> str:
+    """Modify a pin's electrical type in the schematic's lib_symbols section.
+
+    Use this to fix ERC conflicts by changing a pin's type (e.g., changing an
+    output pin to passive to resolve a conflict with another output).
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        lib_id: Library symbol ID (e.g., "Interface_Optical:TSOP382xx").
+        pin_number: Pin number to modify (e.g., "1").
+        pin_type: New electrical type. Valid values: input, output, bidirectional,
+                  tri_state, passive, free, unspecified, power_in, power_out,
+                  open_collector, open_emitter, no_connect.
+
+    Returns whether the pin was found and modified.
+    """
+    logger.info("schematic_modify_lib_symbol_pin: %s pin %s -> %s", lib_id, pin_number, pin_type)
+    ok = schematic.modify_lib_symbol_pin(file_path, lib_id, pin_number, pin_type)
+    return json.dumps({"modified": ok})
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -778,7 +802,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (35 tools registered)")
+    logger.info("KiCad MCP server starting (36 tools registered)")
     mcp.run()
 
 

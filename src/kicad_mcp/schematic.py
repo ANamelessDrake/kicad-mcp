@@ -611,6 +611,49 @@ def get_pin_positions(file_path: str, reference: str) -> list[dict]:
     return []
 
 
+def modify_lib_symbol_pin(
+    file_path: str, lib_id: str, pin_number: str, pin_type: str
+) -> bool:
+    """Modify a pin's electrical type in the schematic's lib_symbols section.
+
+    Valid pin_type values: input, output, bidirectional, tri_state, passive,
+    free, unspecified, power_in, power_out, open_collector, open_emitter,
+    no_connect.
+
+    Returns True if the pin was found and modified.
+    """
+    root = parse_file(file_path)
+    lib_symbols = root.find("lib_symbols")
+    if not lib_symbols:
+        return False
+
+    # Find the lib_symbol
+    lib_sym = None
+    for child in lib_symbols.children:
+        if isinstance(child, SexpList) and child.tag == "symbol":
+            if len(child.children) >= 2 and str(child.children[1]) == lib_id:
+                lib_sym = child
+                break
+
+    if not lib_sym:
+        return False
+
+    # Search all sub-symbols for the pin with matching number
+    for sub in lib_sym.find_all("symbol"):
+        for pin in sub.find_all("pin"):
+            number_node = pin.find("number")
+            if number_node and len(number_node.children) >= 2:
+                if str(number_node.children[1]) == pin_number:
+                    # Pin structure: (pin <type> <shape> (at ...) ...)
+                    # children[0] = "pin", children[1] = type, children[2] = shape
+                    if len(pin.children) >= 2:
+                        pin.children[1] = pin_type
+                        write_file(file_path, root)
+                        return True
+
+    return False
+
+
 # ── Batch operations ────────────────────────────────────────────────────────
 
 
