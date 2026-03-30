@@ -251,6 +251,36 @@ def schematic_get_pin_positions(file_path: str, reference: str) -> str:
 
 
 @mcp.tool()
+def schematic_add_no_connect(file_path: str, x: float, y: float) -> str:
+    """Add a no-connect (X) flag at a pin position.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        x: X position in mm (snapped to grid).
+        y: Y position in mm (snapped to grid).
+
+    Returns the UUID of the no-connect flag.
+    """
+    uuid = schematic.add_no_connect(file_path, x, y)
+    return json.dumps({"uuid": uuid})
+
+
+@mcp.tool()
+def schematic_add_no_connects(file_path: str, positions: list[dict]) -> str:
+    """Add multiple no-connect flags in a single operation.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        positions: List of dicts with keys: x (float), y (float).
+
+    Returns JSON with list of UUIDs.
+    """
+    logger.info("schematic_add_no_connects: %d positions", len(positions))
+    uuids = schematic.add_no_connects_batch(file_path, positions)
+    return json.dumps({"uuids": uuids, "count": len(uuids)})
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -748,7 +778,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (33 tools registered)")
+    logger.info("KiCad MCP server starting (35 tools registered)")
     mcp.run()
 
 

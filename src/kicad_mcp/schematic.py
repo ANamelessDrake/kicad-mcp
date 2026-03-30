@@ -394,6 +394,51 @@ def add_power_symbol(file_path: str, name: str, x: float, y: float, rotation: fl
     return sym_uuid
 
 
+def add_no_connect(file_path: str, x: float, y: float) -> str:
+    """Add a no-connect flag at a pin position. Returns the UUID."""
+    x = _snap_to_grid(x)
+    y = _snap_to_grid(y)
+    path = Path(file_path)
+    if path.exists():
+        root = parse_file(file_path)
+    else:
+        root = _make_empty_schematic()
+
+    nc_uuid = _new_uuid()
+    nc_sexp = f'(no_connect (at {x} {y}) (uuid "{nc_uuid}"))'
+    nc_node = parse(nc_sexp)
+    _insert_before_symbol_instances(root, nc_node)
+
+    write_file(file_path, root)
+    return nc_uuid
+
+
+def add_no_connects_batch(file_path: str, positions: list[dict]) -> list[str]:
+    """Add multiple no-connect flags in a single file read/write cycle.
+
+    Each dict should have: x (float), y (float).
+    Returns list of UUIDs.
+    """
+    path = Path(file_path)
+    if path.exists():
+        root = parse_file(file_path)
+    else:
+        root = _make_empty_schematic()
+
+    uuids: list[str] = []
+    for pos in positions:
+        x = _snap_to_grid(pos["x"])
+        y = _snap_to_grid(pos["y"])
+        nc_uuid = _new_uuid()
+        uuids.append(nc_uuid)
+        nc_sexp = f'(no_connect (at {x} {y}) (uuid "{nc_uuid}"))'
+        nc_node = parse(nc_sexp)
+        _insert_before_symbol_instances(root, nc_node)
+
+    write_file(file_path, root)
+    return uuids
+
+
 # ── Pin position lookup ─────────────────────────────────────────────────────
 
 
