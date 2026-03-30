@@ -230,6 +230,27 @@ def schematic_add_power_symbols(file_path: str, symbols: list[dict]) -> str:
 
 
 @mcp.tool()
+def schematic_get_pin_positions(file_path: str, reference: str) -> str:
+    """Get the actual pin endpoint positions for a component in schematic coordinates.
+
+    Reads the component's position and rotation, looks up pin offsets from the
+    lib_symbols definition, and applies the rotation transform. Use this to find
+    the exact coordinates where labels and wires should connect to a component.
+
+    Handles extended symbols that inherit pins from a parent definition.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        reference: Reference designator (e.g., "R1", "U1", "J1").
+
+    Returns JSON list of {pin_number, pin_name, x, y} for each pin.
+    """
+    logger.info("schematic_get_pin_positions: %s in %s", reference, file_path)
+    pins = schematic.get_pin_positions(file_path, reference)
+    return json.dumps({"pins": pins, "count": len(pins)})
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -727,7 +748,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (32 tools registered)")
+    logger.info("KiCad MCP server starting (33 tools registered)")
     mcp.run()
 
 

@@ -394,6 +394,178 @@ def add_power_symbol(file_path: str, name: str, x: float, y: float, rotation: fl
     return sym_uuid
 
 
+# ── Pin position lookup ─────────────────────────────────────────────────────
+
+
+def _transform_pin_to_schematic(
+    comp_x: float, comp_y: float, comp_rot: float,
+    pin_x: float, pin_y: float,
+) -> tuple[float, float]:
+    """Transform a pin position from symbol coordinates to schematic coordinates.
+
+    KiCad symbol coordinates have Y-up, but schematic coordinates have Y-down.
+    The component rotation is applied as:
+      0°:   screen = (comp_x + pin_x, comp_y - pin_y)
+      90°:  screen = (comp_x + pin_y, comp_y + pin_x)
+      180°: screen = (comp_x - pin_x, comp_y + pin_y)
+      270°: screen = (comp_x - pin_y, comp_y - pin_x)
+    """
+    rot = comp_rot % 360
+    if rot == 0:
+        sx = comp_x + pin_x
+        sy = comp_y - pin_y
+    elif rot == 90:
+        sx = comp_x + pin_y
+        sy = comp_y + pin_x
+    elif rot == 180:
+        sx = comp_x - pin_x
+        sy = comp_y + pin_y
+    elif rot == 270:
+        sx = comp_x - pin_y
+        sy = comp_y - pin_x
+    else:
+        # Non-orthogonal rotation — use trig
+        import math
+        rad = math.radians(rot)
+        cos_r = math.cos(rad)
+        sin_r = math.sin(rad)
+        sx = comp_x + pin_x * cos_r + pin_y * sin_r
+        sy = comp_y - (-pin_x * sin_r + pin_y * cos_r)
+    return (round(sx, 4), round(sy, 4))
+
+
+def _get_lib_symbol_pins(root: SexpList, lib_id: str, unit: int = 1) -> list[dict]:
+    """Extract pin positions from a lib_symbols definition.
+
+    Returns list of {pin_number, pin_name, x, y} in symbol-local coordinates.
+    Handles the (extends "ParentSymbol") pattern.
+    """
+    lib_symbols = root.find("lib_symbols")
+    if not lib_symbols:
+        return []
+
+    # Find the top-level lib_symbol matching lib_id
+    lib_sym = None
+    for child in lib_symbols.children:
+        if isinstance(child, SexpList) and child.tag == "symbol":
+            if len(child.children) >= 2 and str(child.children[1]) == lib_id:
+                lib_sym = child
+                break
+
+    if not lib_sym:
+        return []
+
+    # The symbol name without library prefix (e.g., "GND" from "power:GND")
+    parts = lib_id.split(":")
+    sym_name = parts[1] if len(parts) == 2 else lib_id
+
+    # Look for pins in sub-symbol "{sym_name}_{unit}_1"
+    # If that sub-symbol uses (extends "Parent"), resolve the parent
+    target_sub = f"{sym_name}_{unit}_1"
+
+    pins: list[dict] = []
+    for sub in lib_sym.find_all("symbol"):
+        if len(sub.children) < 2:
+            continue
+        sub_name = str(sub.children[1])
+        if sub_name != target_sub:
+            continue
+
+        # Check for extends
+        extends_node = sub.find("extends")
+        if extends_node and len(extends_node.children) >= 2:
+            parent_name = str(extends_node.children[1])
+            parent_target = f"{parent_name}_{unit}_1"
+            for parent_sub in lib_sym.find_all("symbol"):
+                if len(parent_sub.children) >= 2 and str(parent_sub.children[1]) == parent_target:
+                    pins.extend(_extract_pins_from_subsymbol(parent_sub))
+                    break
+        else:
+            pins.extend(_extract_pins_from_subsymbol(sub))
+        break
+
+    return pins
+
+
+def _extract_pins_from_subsymbol(sub: SexpList) -> list[dict]:
+    """Extract pin info from a sub-symbol node."""
+    pins: list[dict] = []
+    for pin in sub.find_all("pin"):
+        at_node = pin.find("at")
+        if not at_node or len(at_node.children) < 3:
+            continue
+        px = float(at_node.children[1])
+        py = float(at_node.children[2])
+
+        number_node = pin.find("number")
+        pin_number = str(number_node.children[1]) if number_node and len(number_node.children) >= 2 else ""
+
+        name_node = pin.find("name")
+        pin_name = str(name_node.children[1]) if name_node and len(name_node.children) >= 2 else ""
+
+        pins.append({
+            "pin_number": pin_number,
+            "pin_name": pin_name,
+            "x": px,
+            "y": py,
+        })
+    return pins
+
+
+def get_pin_positions(file_path: str, reference: str) -> list[dict]:
+    """Get actual pin endpoint positions for a component in schematic coordinates.
+
+    Reads the component's position and rotation from the schematic, looks up
+    pin offsets from the lib_symbols definition, and applies the rotation
+    transform.
+
+    Returns list of {pin_number, pin_name, x, y} in schematic coordinates.
+    """
+    root = parse_file(file_path)
+
+    # Find the symbol instance by reference
+    for sym in root.find_all("symbol"):
+        ref = ""
+        for prop in sym.find_all("property"):
+            if len(prop.children) >= 3 and str(prop.children[1]) == "Reference":
+                ref = str(prop.children[2])
+                break
+
+        if ref != reference:
+            continue
+
+        lib_id_node = sym.find("lib_id")
+        if not lib_id_node or len(lib_id_node.children) < 2:
+            continue
+        lib_id = str(lib_id_node.children[1])
+
+        at_node = sym.find("at")
+        comp_x = float(at_node.children[1]) if at_node and len(at_node.children) >= 2 else 0.0
+        comp_y = float(at_node.children[2]) if at_node and len(at_node.children) >= 3 else 0.0
+        comp_rot = float(at_node.children[3]) if at_node and len(at_node.children) >= 4 else 0.0
+
+        unit_node = sym.find("unit")
+        unit = int(unit_node.children[1]) if unit_node and len(unit_node.children) >= 2 else 1
+
+        # Get pin offsets from lib_symbols
+        lib_pins = _get_lib_symbol_pins(root, lib_id, unit)
+
+        result: list[dict] = []
+        for pin in lib_pins:
+            sx, sy = _transform_pin_to_schematic(
+                comp_x, comp_y, comp_rot, pin["x"], pin["y"]
+            )
+            result.append({
+                "pin_number": pin["pin_number"],
+                "pin_name": pin["pin_name"],
+                "x": sx,
+                "y": sy,
+            })
+        return result
+
+    return []
+
+
 # ── Batch operations ────────────────────────────────────────────────────────
 
 
