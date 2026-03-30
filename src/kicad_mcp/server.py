@@ -183,6 +183,37 @@ def schematic_delete(file_path: str, uuid: str) -> str:
 
 
 @mcp.tool()
+def schematic_add_labels(file_path: str, labels: list[dict]) -> str:
+    """Add multiple net labels in a single operation (one file read/write cycle).
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        labels: List of label dicts, each with keys: name (str), x (float), y (float),
+                and optionally rotation (float, default 0).
+
+    Returns JSON with list of UUIDs.
+    """
+    logger.info("schematic_add_labels: %d labels", len(labels))
+    uuids = schematic.add_labels_batch(file_path, labels)
+    return json.dumps({"uuids": uuids, "count": len(uuids)})
+
+
+@mcp.tool()
+def schematic_delete_many(file_path: str, uuids: list[str]) -> str:
+    """Delete multiple schematic elements by UUID in a single operation.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        uuids: List of UUIDs to delete.
+
+    Returns JSON with list of booleans indicating which were found and deleted.
+    """
+    logger.info("schematic_delete_many: %d uuids", len(uuids))
+    results = schematic.delete_many(file_path, uuids)
+    return json.dumps({"results": results, "deleted_count": sum(results)})
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -680,7 +711,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (29 tools registered)")
+    logger.info("KiCad MCP server starting (31 tools registered)")
     mcp.run()
 
 

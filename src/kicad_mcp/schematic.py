@@ -33,6 +33,40 @@ def _snap_to_grid(value: float, grid: float = 1.27) -> float:
     return round(value / grid) * grid
 
 
+def _get_schematic_uuid(root: SexpList) -> str:
+    """Get the root UUID of the schematic."""
+    uuid_node = root.find("uuid")
+    if uuid_node and len(uuid_node.children) >= 2:
+        return str(uuid_node.children[1])
+    return ""
+
+
+def _get_project_name(file_path: str) -> str:
+    """Derive the project name from the schematic file path."""
+    return Path(file_path).stem
+
+
+def _insert_before_symbol_instances(root: SexpList, node: SexpList) -> None:
+    """Insert a node before symbol_instances, or at end if not present."""
+    si = root.find("symbol_instances")
+    if si:
+        idx = root.children.index(si)
+        root.children.insert(idx, node)
+    else:
+        root.children.append(node)
+
+
+def _make_instances_block(
+    project_name: str, schematic_uuid: str, reference: str, unit: int = 1
+) -> str:
+    """Build the (instances ...) S-expression that KiCad 8 requires on symbols."""
+    return (
+        f'(instances (project "{esc(project_name)}" '
+        f'(path "/{esc(schematic_uuid)}" '
+        f'(reference "{esc(reference)}") (unit {unit}))))'
+    )
+
+
 def _make_empty_schematic() -> SexpList:
     """Create a minimal empty schematic S-expression tree."""
     return parse(
@@ -199,32 +233,32 @@ def place_symbol(
 
     _ensure_lib_symbol(root, lib_id)
 
+    project = _get_project_name(file_path)
+    sch_uuid = _get_schematic_uuid(root)
     sym_uuid = _new_uuid()
     pin1_uuid = _new_uuid()
     pin2_uuid = _new_uuid()
 
+    instances = _make_instances_block(project, sch_uuid, reference)
     sym_sexp = (
         f'(symbol (lib_id "{esc(lib_id)}") (at {x} {y} {rotation}) (unit 1) '
+        f'(exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no) '
         f'(uuid "{sym_uuid}") '
         f'(property "Reference" "{esc(reference)}" (at {x} {y - 2} 0) '
         f'(effects (font (size 1.27 1.27)))) '
         f'(property "Value" "{esc(value)}" (at {x} {y + 2} 0) '
         f'(effects (font (size 1.27 1.27)))) '
         f'(property "Footprint" "{esc(footprint)}" (at {x} {y} 0) '
-        f'(effects hide)) '
+        f'(effects (font (size 1.27 1.27)) (hide yes))) '
+        f'(property "Datasheet" "" (at {x} {y} 0) '
+        f'(effects (font (size 1.27 1.27)) (hide yes))) '
         f'(pin "1" (uuid "{pin1_uuid}")) '
-        f'(pin "2" (uuid "{pin2_uuid}")))'
+        f'(pin "2" (uuid "{pin2_uuid}")) '
+        f'{instances})'
     )
 
     sym_node = parse(sym_sexp)
-
-    # Insert before symbol_instances or at end
-    si = root.find("symbol_instances")
-    if si:
-        idx = root.children.index(si)
-        root.children.insert(idx, sym_node)
-    else:
-        root.children.append(sym_node)
+    _insert_before_symbol_instances(root, sym_node)
 
     write_file(file_path, root)
     return sym_uuid
@@ -248,8 +282,6 @@ def add_wire(file_path: str, points: list[tuple[float, float]]) -> str:
     else:
         root = _make_empty_schematic()
 
-    si = root.find("symbol_instances")
-
     last_uuid = ""
     for i in range(len(points) - 1):
         x1, y1 = points[i]
@@ -261,12 +293,7 @@ def add_wire(file_path: str, points: list[tuple[float, float]]) -> str:
         last_uuid = wire_uuid
         wire_sexp = f'(wire (pts (xy {x1} {y1}) (xy {x2} {y2})) (uuid "{wire_uuid}"))'
         wire_node = parse(wire_sexp)
-
-        if si:
-            idx = root.children.index(si)
-            root.children.insert(idx, wire_node)
-        else:
-            root.children.append(wire_node)
+        _insert_before_symbol_instances(root, wire_node)
 
     if not last_uuid:
         raise ValueError("All wire segments were zero-length.")
@@ -291,13 +318,7 @@ def add_label(file_path: str, name: str, x: float, y: float, rotation: float = 0
         f'(effects (font (size 1.27 1.27))))'
     )
     lbl_node = parse(lbl_sexp)
-
-    si = root.find("symbol_instances")
-    if si:
-        idx = root.children.index(si)
-        root.children.insert(idx, lbl_node)
-    else:
-        root.children.append(lbl_node)
+    _insert_before_symbol_instances(root, lbl_node)
 
     write_file(file_path, root)
     return lbl_uuid
@@ -307,6 +328,7 @@ def add_global_label(file_path: str, name: str, x: float, y: float, rotation: fl
     """Add a global label to the schematic. Returns the UUID."""
     x = _snap_to_grid(x)
     y = _snap_to_grid(y)
+
     path = Path(file_path)
     if path.exists():
         root = parse_file(file_path)
@@ -321,13 +343,7 @@ def add_global_label(file_path: str, name: str, x: float, y: float, rotation: fl
         f'(effects (font (size 1.27 1.27)) hide)))'
     )
     lbl_node = parse(lbl_sexp)
-
-    si = root.find("symbol_instances")
-    if si:
-        idx = root.children.index(si)
-        root.children.insert(idx, lbl_node)
-    else:
-        root.children.append(lbl_node)
+    _insert_before_symbol_instances(root, lbl_node)
 
     write_file(file_path, root)
     return lbl_uuid
@@ -346,50 +362,109 @@ def add_power_symbol(file_path: str, name: str, x: float, y: float, rotation: fl
     power_lib_id = f"power:{name}"
     _ensure_lib_symbol(root, power_lib_id)
 
+    project = _get_project_name(file_path)
+    sch_uuid = _get_schematic_uuid(root)
     sym_uuid = _new_uuid()
     pin_uuid = _new_uuid()
+    ref = f"#PWR?"
 
+    instances = _make_instances_block(project, sch_uuid, ref)
     sym_sexp = (
         f'(symbol (lib_id "{esc(power_lib_id)}") (at {x} {y} {rotation}) (unit 1) '
+        f'(exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no) '
         f'(uuid "{sym_uuid}") '
-        f'(property "Reference" "#{esc(name)}" (at {x} {y - 2} 0) '
-        f'(effects (font (size 1.27 1.27)) hide)) '
+        f'(property "Reference" "{esc(ref)}" (at {x} {y - 2} 0) '
+        f'(effects (font (size 1.27 1.27)) (hide yes))) '
         f'(property "Value" "{esc(name)}" (at {x} {y + 2} 0) '
         f'(effects (font (size 1.27 1.27)))) '
         f'(property "Footprint" "" (at {x} {y} 0) '
-        f'(effects hide)) '
-        f'(pin "1" (uuid "{pin_uuid}")))'
+        f'(effects (font (size 1.27 1.27)) (hide yes))) '
+        f'(property "Datasheet" "" (at {x} {y} 0) '
+        f'(effects (font (size 1.27 1.27)) (hide yes))) '
+        f'(property "Description" "Power symbol creates a global label with name \\"{esc(name)}\\"" '
+        f'(at {x} {y} 0) '
+        f'(effects (font (size 1.27 1.27)) (hide yes))) '
+        f'(pin "1" (uuid "{pin_uuid}")) '
+        f'{instances})'
     )
     sym_node = parse(sym_sexp)
-
-    si = root.find("symbol_instances")
-    if si:
-        idx = root.children.index(si)
-        root.children.insert(idx, sym_node)
-    else:
-        root.children.append(sym_node)
+    _insert_before_symbol_instances(root, sym_node)
 
     write_file(file_path, root)
     return sym_uuid
 
 
-def delete_by_uuid(file_path: str, target_uuid: str) -> bool:
-    """Delete any schematic element by UUID. Returns True if found and deleted."""
-    root = parse_file(file_path)
+# ── Batch operations ────────────────────────────────────────────────────────
 
-    def _search_and_remove(parent: SexpList) -> bool:
+
+def add_labels_batch(
+    file_path: str,
+    labels: list[dict],
+) -> list[str]:
+    """Add multiple labels in a single file read/write cycle.
+
+    Each label dict should have: name, x, y, and optionally rotation.
+    Returns list of UUIDs.
+    """
+    path = Path(file_path)
+    if path.exists():
+        root = parse_file(file_path)
+    else:
+        root = _make_empty_schematic()
+
+    uuids: list[str] = []
+    for lbl in labels:
+        x = _snap_to_grid(lbl["x"])
+        y = _snap_to_grid(lbl["y"])
+        rotation = lbl.get("rotation", 0)
+        name = lbl["name"]
+        lbl_uuid = _new_uuid()
+        uuids.append(lbl_uuid)
+
+        lbl_sexp = (
+            f'(label "{esc(name)}" (at {x} {y} {rotation}) (uuid "{lbl_uuid}") '
+            f'(effects (font (size 1.27 1.27))))'
+        )
+        lbl_node = parse(lbl_sexp)
+        _insert_before_symbol_instances(root, lbl_node)
+
+    write_file(file_path, root)
+    return uuids
+
+
+def delete_many(file_path: str, target_uuids: list[str]) -> list[bool]:
+    """Delete multiple schematic elements by UUID in a single file read/write cycle.
+
+    Returns a list of booleans indicating whether each UUID was found and deleted.
+    """
+    root = parse_file(file_path)
+    target_set = set(target_uuids)
+    found: dict[str, bool] = {u: False for u in target_uuids}
+
+    def _search_and_remove(parent: SexpList) -> None:
         for child in list(parent.children):
             if isinstance(child, SexpList):
                 uuid_node = child.find("uuid")
                 if uuid_node and len(uuid_node.children) >= 2:
-                    if str(uuid_node.children[1]) == target_uuid:
+                    child_uuid = str(uuid_node.children[1])
+                    if child_uuid in target_set:
                         parent.remove_child(child)
-                        return True
-                if _search_and_remove(child):
-                    return True
-        return False
+                        found[child_uuid] = True
+                        if all(found.values()):
+                            return
+                _search_and_remove(child)
+                if all(found.values()):
+                    return
 
-    found = _search_and_remove(root)
-    if found:
+    _search_and_remove(root)
+
+    if any(found.values()):
         write_file(file_path, root)
-    return found
+
+    return [found[u] for u in target_uuids]
+
+
+def delete_by_uuid(file_path: str, target_uuid: str) -> bool:
+    """Delete any schematic element by UUID. Returns True if found and deleted."""
+    results = delete_many(file_path, [target_uuid])
+    return results[0]
