@@ -61,7 +61,7 @@ def schematic_read(file_path: str) -> str:
     Returns structured JSON with components (ref, value, footprint, position, pins),
     wires, and labels.
     """
-    logger.debug("schematic_read: %s", file_path)
+    logger.info("schematic_read: %s", file_path)
     data = schematic.read_schematic(file_path)
     return json.dumps(asdict(data), indent=2)
 
@@ -91,7 +91,7 @@ def schematic_place_symbol(
 
     Returns the UUID of the placed symbol.
     """
-    logger.debug("schematic_place_symbol: %s %s at (%s,%s)", lib_id, reference, x, y)
+    logger.info("schematic_place_symbol: %s %s at (%s,%s)", lib_id, reference, x, y)
     uuid = schematic.place_symbol(file_path, lib_id, reference, value, footprint, x, y, rotation)
     return json.dumps({"uuid": uuid})
 
@@ -203,7 +203,7 @@ def pcb_read(file_path: str) -> str:
     Returns structured JSON with footprints (ref, position, rotation, layer, pad nets),
     traces, vias, zones, board outline, and net list.
     """
-    logger.debug("pcb_read: %s", file_path)
+    logger.info("pcb_read: %s", file_path)
     data = pcb.read_pcb(file_path)
     return json.dumps(asdict(data), indent=2)
 
@@ -233,7 +233,7 @@ def pcb_place_footprint(
 
     Returns the UUID of the placed footprint.
     """
-    logger.debug("pcb_place_footprint: %s %s at (%s,%s)", footprint_lib, reference, x, y)
+    logger.info("pcb_place_footprint: %s %s at (%s,%s)", footprint_lib, reference, x, y)
     uuid = pcb.place_footprint(file_path, footprint_lib, reference, value, x, y, rotation, layer)
     return json.dumps({"uuid": uuid})
 
@@ -421,7 +421,7 @@ def pcb_place_footprint_array(
 
     Returns JSON with list of UUIDs.
     """
-    logger.debug("pcb_place_footprint_array: %s x%d %s", footprint_lib, count, pattern)
+    logger.info("pcb_place_footprint_array: %s x%d %s", footprint_lib, count, pattern)
     uuids = pcb.place_footprint_array(
         file_path, footprint_lib, reference_prefix, value, count,
         pattern, start_x, start_y, spacing_x, spacing_y, columns,
@@ -642,7 +642,7 @@ def search_jlcpcb_parts(
 
     Returns JSON array of parts with LCSC number, manufacturer, package, stock, price.
     """
-    logger.debug("search_jlcpcb_parts: %s", query)
+    logger.info("search_jlcpcb_parts: %s", query)
     parts = jlcpcb.search_parts(query, category, in_stock, limit)
     return json.dumps([asdict(p) for p in parts], indent=2)
 
@@ -675,7 +675,7 @@ def main() -> None:
     def _handle_shutdown(signum: int, _frame: object) -> None:
         sig_name = signal.Signals(signum).name
         logger.info("Received %s, shutting down...", sig_name)
-        sys.exit(0)
+        os._exit(0)
 
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
