@@ -710,11 +710,12 @@ def get_netlist(schematic_path: str) -> str:
 
 @mcp.tool()
 def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
-    """Update PCB netlist from schematic.
+    """Update PCB from schematic: nets, footprints, and pad net assignments.
 
-    Exports a netlist from the schematic via kicad-cli, then ensures the PCB
-    has matching net declarations and footprints for all schematic components.
-    Missing footprints are placed at (50, 50) for manual arrangement.
+    Exports a netlist from the schematic via kicad-cli, then:
+    1. Adds missing net declarations to the PCB
+    2. Places missing footprints (spaced out for manual arrangement)
+    3. Updates pad-to-net assignments on all existing footprints to match the netlist
 
     Args:
         schematic_path: Path to the .kicad_sch file.
@@ -723,47 +724,54 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
     Returns a summary of changes made.
     """
     import tempfile
-    import xml.etree.ElementTree as ET
     from pathlib import Path
 
     from .sexp_parser import parse_file, write_file
 
     logger.info("sync_schematic_to_pcb: %s -> %s", schematic_path, pcb_path)
 
-    # Export netlist from schematic
-    net_names: set[str] = set()
+    # Export netlist (S-expression format) from schematic
     components: list[dict] = []  # {ref, value, footprint}
+    # pin_nets maps (ref, pin_number) -> net_name
+    pin_nets: dict[tuple[str, str], str] = {}
+    net_names: set[str] = set()
 
     try:
-        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".net", delete=False) as f:
             netlist_path = f.name
         cli.export_netlist(schematic_path, netlist_path)
-        tree = ET.parse(netlist_path)
-        root_xml = tree.getroot()
+        netlist = parse_file(netlist_path)
 
-        # Extract components from netlist XML
-        for comp in root_xml.iter("comp"):
-            ref = comp.get("ref", "")
-            if not ref or ref.startswith("#"):
-                continue
-            value_el = comp.find("value")
-            fp_el = comp.find("footprint")
-            components.append({
-                "ref": ref,
-                "value": value_el.text if value_el is not None else "",
-                "footprint": fp_el.text if fp_el is not None else "",
-            })
+        # Extract components
+        comps_node = netlist.find("components")
+        if comps_node:
+            for comp in comps_node.find_all("comp"):
+                ref = str(comp.find_value("ref") or "")
+                if not ref or ref.startswith("#"):
+                    continue
+                value = str(comp.find_value("value") or "")
+                fp_node = comp.find("footprint")
+                fp = str(fp_node.children[1]) if fp_node and len(fp_node.children) >= 2 else ""
+                components.append({"ref": ref, "value": value, "footprint": fp})
 
-        # Extract net names from netlist XML
-        for net in root_xml.iter("net"):
-            name = net.get("name", "")
-            if name:
+        # Extract nets with pin assignments
+        nets_node = netlist.find("nets")
+        if nets_node:
+            for net in nets_node.find_all("net"):
+                name = str(net.find_value("name") or "")
+                if not name:
+                    continue
                 net_names.add(name)
+                for node in net.find_all("node"):
+                    ref = str(node.find_value("ref") or "")
+                    pin = str(node.find_value("pin") or "")
+                    if ref and pin:
+                        pin_nets[(ref, pin)] = name
 
         Path(netlist_path).unlink(missing_ok=True)
-    except Exception:
+    except Exception as e:
         # Fallback: read schematic directly if kicad-cli is not available
-        logger.warning("kicad-cli netlist export failed, falling back to schematic parse")
+        logger.warning("kicad-cli netlist export failed (%s), falling back to schematic parse", e)
         sch_data = schematic.read_schematic(schematic_path)
         for sym in sch_data.symbols:
             if sym.reference and not sym.reference.startswith("#") and sym.footprint:
@@ -780,6 +788,7 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
 
     root = parse_file(pcb_path)
 
+    # 1. Add missing net declarations
     added_nets: list[str] = []
     for name in sorted(net_names):
         pcb._ensure_net(root, name)
@@ -787,7 +796,7 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
 
     write_file(pcb_path, root)
 
-    # Place missing footprints
+    # 2. Place missing footprints
     pcb_data = pcb.read_pcb(pcb_path)
     existing_refs = {fp.reference for fp in pcb_data.footprints}
 
@@ -800,12 +809,56 @@ def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
                 x_offset, 50, 0, "F.Cu",
             )
             added_fps.append(comp["ref"])
-            x_offset += 10.0  # space them out horizontally
+            x_offset += 10.0
+
+    # 3. Update pad net assignments on all footprints
+    updated_pads = 0
+    if pin_nets:
+        # Re-read the PCB after footprint additions
+        root = parse_file(pcb_path)
+
+        for fp_node in root.find_all("footprint"):
+            # Get the footprint's reference
+            fp_ref = ""
+            for prop in fp_node.find_all("property"):
+                if len(prop.children) >= 3 and str(prop.children[1]) == "Reference":
+                    fp_ref = str(prop.children[2])
+                    break
+
+            if not fp_ref:
+                continue
+
+            for pad_node in fp_node.find_all("pad"):
+                if len(pad_node.children) < 2:
+                    continue
+                pad_num = str(pad_node.children[1])
+                target_net = pin_nets.get((fp_ref, pad_num))
+                if target_net is None:
+                    continue
+
+                # Ensure the net exists and get its number
+                net_num = pcb._ensure_net(root, target_net)
+
+                # Update or add the net assignment on this pad
+                from .sexp_parser import QuotedString, parse as _parse
+                net_node = pad_node.find("net")
+                if net_node:
+                    old_name = str(net_node.children[2]) if len(net_node.children) >= 3 else ""
+                    if old_name != target_net:
+                        net_node.children = ["net", net_num, QuotedString(target_net)]
+                        updated_pads += 1
+                else:
+                    pad_node.children.append(_parse(f'(net {net_num} "{target_net}")'))
+                    updated_pads += 1
+
+        write_file(pcb_path, root)
 
     return json.dumps({
         "added_nets": added_nets,
         "added_footprints": added_fps,
+        "updated_pads": updated_pads,
         "total_components": len(components),
+        "total_pin_net_mappings": len(pin_nets),
     })
 
 
