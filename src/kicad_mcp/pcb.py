@@ -577,18 +577,37 @@ def autoroute(
     file_path: str,
     freerouting_jar: str | None = None,
     timeout: int = 300,
+    strategy: str = "auto",
 ) -> dict:
-    """Run Freerouting autorouter on a PCB file.
+    """Route a PCB.
 
-    Exports DSN, runs Freerouting, imports SES result.
+    Strategies:
+    - "freerouting": Use Freerouting (requires pcbnew + Java)
+    - "simple": L-shaped routing using add_trace/add_via
+    - "auto": Try Freerouting, fall back to simple
+
     Returns dict with status and details.
     """
+    if not Path(file_path).exists():
+        raise FileNotFoundError(f"PCB file not found: {file_path}")
+
+    if strategy in ("freerouting", "auto"):
+        try:
+            return _autoroute_freerouting(file_path, freerouting_jar, timeout)
+        except RuntimeError as e:
+            if strategy == "freerouting":
+                raise
+            # Fall through to simple router
+
+    return _autoroute_simple(file_path)
+
+
+def _autoroute_freerouting(
+    file_path: str, freerouting_jar: str | None, timeout: int
+) -> dict:
+    """Route using Freerouting (requires pcbnew Python module + Java)."""
     import tempfile
     from . import cli as kicad_cli
-
-    pcb_path = Path(file_path)
-    if not pcb_path.exists():
-        raise FileNotFoundError(f"PCB file not found: {file_path}")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         dsn_path = str(Path(tmp_dir) / "board.dsn")
@@ -598,7 +617,104 @@ def autoroute(
         kicad_cli.run_freerouting(dsn_path, ses_path, freerouting_jar, timeout)
         kicad_cli.import_ses(file_path, ses_path)
 
-    return {"status": "success", "file": file_path}
+    return {"status": "success", "method": "freerouting", "file": file_path}
+
+
+_POWER_NETS = {"GND", "+3V3", "+3.3V", "+5V", "+12V", "VCC", "VDD", "VBUS"}
+_POWER_TRACE_WIDTH = 0.4
+_SIGNAL_TRACE_WIDTH = 0.25
+_VIA_SIZE = 0.8
+_VIA_DRILL = 0.4
+
+
+def _autoroute_simple(file_path: str) -> dict:
+    """Simple L-shaped autorouter using add_trace and add_via.
+
+    Strategy:
+    - GND pads: drop a via to B.Cu ground plane
+    - Power pads: route on F.Cu with wider traces
+    - Signal pads: route on F.Cu with L-shaped paths (horizontal then vertical)
+    - Connects pairs of pads on the same net
+    """
+    data = read_pcb(file_path)
+
+    # Build net-to-pads map: net_name -> [(fp_ref, pad_num, abs_x, abs_y)]
+    net_pads: dict[str, list[tuple[str, str, float, float]]] = {}
+    for fp in data.footprints:
+        for pad in fp.pads:
+            if not pad.net_name or pad.net_name == "":
+                continue
+            # Pad position is relative to footprint; compute absolute
+            abs_x = fp.position.x + pad.position.x
+            abs_y = fp.position.y + pad.position.y
+            net_pads.setdefault(pad.net_name, []).append(
+                (fp.reference, pad.number, abs_x, abs_y)
+            )
+
+    # Get existing trace endpoints to avoid duplicates
+    existing_segments: set[tuple[float, float, float, float]] = set()
+    for t in data.traces:
+        existing_segments.add((t.start.x, t.start.y, t.end.x, t.end.y))
+        existing_segments.add((t.end.x, t.end.y, t.start.x, t.start.y))
+
+    traces_added = 0
+    vias_added = 0
+    nets_routed = 0
+
+    for net_name, pads in net_pads.items():
+        is_gnd = net_name.upper() == "GND"
+        is_power = net_name in _POWER_NETS
+
+        # GND pads always get vias even if there's only one
+        if not is_gnd and len(pads) < 2:
+            continue
+        width = _POWER_TRACE_WIDTH if is_power else _SIGNAL_TRACE_WIDTH
+
+        if is_gnd:
+            # GND strategy: drop a via at each pad to reach B.Cu ground plane
+            for _ref, _pin, px, py in pads:
+                seg_key = (px, py, px, py)
+                if seg_key not in existing_segments:
+                    add_via(file_path, net_name, px, py, _VIA_SIZE, _VIA_DRILL)
+                    vias_added += 1
+                    existing_segments.add(seg_key)
+            nets_routed += 1
+        else:
+            # Connect pads sequentially with L-shaped routes on F.Cu
+            routed_any = False
+            for i in range(len(pads) - 1):
+                _, _, x1, y1 = pads[i]
+                _, _, x2, y2 = pads[i + 1]
+
+                seg_key = (x1, y1, x2, y2)
+                if seg_key in existing_segments:
+                    continue
+
+                # L-shaped: horizontal then vertical
+                points = [(x1, y1), (x2, y1), (x2, y2)]
+                # Skip if start == end
+                if x1 == x2 and y1 == y2:
+                    continue
+                # Simplify to straight line if aligned
+                if x1 == x2 or y1 == y2:
+                    points = [(x1, y1), (x2, y2)]
+
+                add_trace(file_path, net_name, "F.Cu", width, points)
+                traces_added += len(points) - 1
+                existing_segments.add(seg_key)
+                routed_any = True
+
+            if routed_any:
+                nets_routed += 1
+
+    return {
+        "status": "success",
+        "method": "simple",
+        "traces_added": traces_added,
+        "vias_added": vias_added,
+        "nets_routed": nets_routed,
+        "file": file_path,
+    }
 
 
 def set_zone_net(file_path: str, zone_uuid: str, net_name: str) -> bool:

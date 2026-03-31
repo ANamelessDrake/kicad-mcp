@@ -6,6 +6,8 @@ import json
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from .types import DRCViolation, ERCViolation, Point
@@ -210,27 +212,88 @@ def export_netlist(
     return output_path
 
 
+def _get_freerouting_jar() -> str:
+    """Find or download the Freerouting JAR. Returns path to the JAR."""
+    import os
+    import urllib.request
+
+    # Check env var first
+    jar_path = os.environ.get("FREEROUTING_JAR")
+    if jar_path and Path(jar_path).exists():
+        return jar_path
+
+    # Check cache
+    cache_dir = Path.home() / ".cache" / "kicad-mcp"
+    cached_jar = cache_dir / "freerouting.jar"
+    if cached_jar.exists():
+        return str(cached_jar)
+
+    # Download from GitHub releases
+    release_url = "https://api.github.com/repos/freerouting/freerouting/releases/latest"
+    try:
+        req = urllib.request.Request(release_url, headers={"User-Agent": "kicad-mcp/0.1"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            release = json.loads(resp.read().decode())
+
+        jar_url = None
+        for asset in release.get("assets", []):
+            name = asset.get("name", "")
+            if name.endswith(".jar") and "freerouting" in name.lower():
+                jar_url = asset["browser_download_url"]
+                break
+
+        if not jar_url:
+            raise RuntimeError(
+                "Could not find Freerouting JAR in latest release. "
+                "Download manually from https://github.com/freerouting/freerouting/releases "
+                "and set FREEROUTING_JAR env var."
+            )
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(jar_url, headers={"User-Agent": "kicad-mcp/0.1"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            cached_jar.write_bytes(resp.read())
+
+        return str(cached_jar)
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError(
+            f"Failed to download Freerouting: {e}. "
+            "Download manually from https://github.com/freerouting/freerouting/releases "
+            "and set FREEROUTING_JAR env var."
+        ) from e
+
+
 def export_dsn(file_path: str, output_path: str) -> str:
-    """Export PCB to Specctra DSN format for autorouting."""
-    cli = _find_kicad_cli()
-    if not cli:
-        raise RuntimeError("kicad-cli not found.")
-    cmd = [cli, "pcb", "export", "dsn", "--output", output_path, file_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError(f"DSN export failed: {result.stderr.strip()}")
+    """Export PCB to Specctra DSN format for autorouting.
+
+    Note: kicad-cli does not support DSN export. This requires the pcbnew
+    Python module. Raises RuntimeError if pcbnew is not available.
+    """
+    try:
+        import pcbnew
+    except ImportError:
+        raise RuntimeError(
+            "DSN export requires the pcbnew Python module (part of KiCad). "
+            "It is not available in this Python environment. "
+            "Install KiCad or use the simple autorouter fallback."
+        )
+    board = pcbnew.LoadBoard(file_path)
+    pcbnew.ExportSpecctraDSN(board, output_path)
     return output_path
 
 
 def import_ses(pcb_path: str, ses_path: str) -> str:
-    """Import Specctra SES (routed session) back into PCB."""
-    cli = _find_kicad_cli()
-    if not cli:
-        raise RuntimeError("kicad-cli not found.")
-    cmd = [cli, "pcb", "import", "specctra_ses", "--output", pcb_path, ses_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError(f"SES import failed: {result.stderr.strip()}")
+    """Import Specctra SES (routed session) back into PCB.
+
+    Note: Requires the pcbnew Python module.
+    """
+    try:
+        import pcbnew
+    except ImportError:
+        raise RuntimeError("SES import requires the pcbnew Python module.")
+    board = pcbnew.LoadBoard(pcb_path)
+    pcbnew.ImportSpecctraSES(board, ses_path)
+    board.Save(pcb_path)
     return pcb_path
 
 
@@ -241,20 +304,15 @@ def run_freerouting(
     timeout: int = 300,
 ) -> str:
     """Run the Freerouting autorouter on a DSN file."""
-    import os
-
-    jar_path = freerouting_jar or os.environ.get("FREEROUTING_JAR", "freerouting.jar")
-
     java = shutil.which("java")
     if not java:
-        raise RuntimeError("Java not found. Freerouting requires a Java runtime.")
-
-    if not Path(jar_path).exists():
         raise RuntimeError(
-            f"Freerouting JAR not found at {jar_path}. "
-            "Download from https://github.com/freerouting/freerouting/releases "
-            "and set FREEROUTING_JAR env var."
+            "Java not found. Freerouting requires a Java runtime. "
+            "Install Java (e.g., 'sudo dnf install java-latest-openjdk' or "
+            "'sudo apt install default-jre')."
         )
+
+    jar_path = freerouting_jar or _get_freerouting_jar()
 
     cmd = [
         java, "-jar", jar_path,
@@ -265,7 +323,7 @@ def run_freerouting(
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
-        raise RuntimeError(f"Freerouting failed: {result.stderr.strip()}")
+        raise RuntimeError(f"Freerouting failed: {result.stderr.strip() or result.stdout.strip()}")
 
     if not Path(output_ses_path).exists():
         raise RuntimeError("Freerouting completed but no SES output was generated.")

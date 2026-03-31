@@ -611,22 +611,30 @@ def pcb_autoroute(
     file_path: str,
     freerouting_jar: str | None = None,
     timeout: int = 300,
+    strategy: str = "auto",
 ) -> str:
-    """Autoroute a PCB using Freerouting.
+    """Route a PCB automatically.
 
-    Exports the PCB to Specctra DSN format, runs the Freerouting autorouter,
-    and imports the routed result back. Requires Java and Freerouting JAR.
+    Strategies:
+    - "auto" (default): Try Freerouting first, fall back to simple L-routing
+    - "freerouting": Use Freerouting only (requires pcbnew Python module + Java)
+    - "simple": L-shaped routing on F.Cu, GND pads via down to B.Cu ground plane
+
+    The simple router connects nets with L-shaped traces (horizontal then vertical).
+    GND pads get vias to the back copper pour. Power nets use 0.4mm traces,
+    signal nets use 0.25mm.
 
     Args:
         file_path: Path to the .kicad_pcb file.
-        freerouting_jar: Path to freerouting.jar (default: FREEROUTING_JAR env var).
-        timeout: Max seconds to wait for routing (default 300).
+        freerouting_jar: Path to freerouting.jar (auto-downloaded if not specified).
+        timeout: Max seconds for Freerouting (default 300).
+        strategy: "auto", "freerouting", or "simple".
 
-    Returns status JSON.
+    Returns status JSON with method used and routing statistics.
     """
-    logger.info("pcb_autoroute: starting on %s", file_path)
-    result = pcb.autoroute(file_path, freerouting_jar, timeout)
-    logger.info("pcb_autoroute: completed")
+    logger.info("pcb_autoroute: %s strategy=%s", file_path, strategy)
+    result = pcb.autoroute(file_path, freerouting_jar, timeout, strategy)
+    logger.info("pcb_autoroute: completed via %s", result.get("method", "unknown"))
     return json.dumps(result)
 
 
