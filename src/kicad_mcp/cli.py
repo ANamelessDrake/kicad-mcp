@@ -13,6 +13,56 @@ from pathlib import Path
 from .types import DRCViolation, ERCViolation, Point
 
 
+_pcbnew_python_cache: str | None = None
+
+
+def _find_pcbnew_python() -> str | None:
+    """Find a Python interpreter that has the pcbnew module. Cached after first call."""
+    global _pcbnew_python_cache
+    if _pcbnew_python_cache is not None:
+        return _pcbnew_python_cache
+
+    import sys
+    env = {**__import__("os").environ, "DISPLAY": "", "WAYLAND_DISPLAY": ""}
+    for python in [sys.executable, "python3.13", "python3.12", "python3"]:
+        py = shutil.which(python) if not python.startswith("/") else python
+        if not py:
+            continue
+        try:
+            result = subprocess.run(
+                [py, "-c", "import pcbnew; print('ok')"],
+                capture_output=True, text=True, timeout=10, env=env,
+            )
+            if result.returncode == 0 and "ok" in result.stdout:
+                _pcbnew_python_cache = py
+                return py
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+    return None
+
+
+def _run_pcbnew(script: str, timeout: int = 60) -> str:
+    """Run a Python script that uses pcbnew, finding the right interpreter.
+
+    Returns stdout. Raises RuntimeError if pcbnew is not available.
+    Runs headless (DISPLAY unset) to prevent GUI initialization.
+    """
+    py = _find_pcbnew_python()
+    if not py:
+        raise RuntimeError(
+            "pcbnew Python module not found on any Python interpreter. "
+            "Install KiCad 8 (it bundles pcbnew with its Python)."
+        )
+    env = {**__import__("os").environ, "DISPLAY": "", "WAYLAND_DISPLAY": ""}
+    result = subprocess.run(
+        [py, "-c", script],
+        capture_output=True, text=True, timeout=timeout, env=env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"pcbnew script failed: {result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout
+
+
 def _find_kicad_cli() -> str | None:
     """Find the kicad-cli executable."""
     return shutil.which("kicad-cli")
@@ -441,33 +491,29 @@ def _get_freerouting_jar() -> str:
 def export_dsn(file_path: str, output_path: str) -> str:
     """Export PCB to Specctra DSN format for autorouting.
 
-    Note: kicad-cli does not support DSN export. This requires the pcbnew
-    Python module. Raises RuntimeError if pcbnew is not available.
+    Uses pcbnew via subprocess (auto-detects the Python that has pcbnew).
     """
-    try:
-        import pcbnew
-    except ImportError:
-        raise RuntimeError(
-            "DSN export requires the pcbnew Python module (part of KiCad). "
-            "It is not available in this Python environment. "
-            "Install KiCad or use the simple autorouter fallback."
-        )
-    board = pcbnew.LoadBoard(file_path)
-    pcbnew.ExportSpecctraDSN(board, output_path)
+    _run_pcbnew(
+        f"import pcbnew; "
+        f"board = pcbnew.LoadBoard({file_path!r}); "
+        f"pcbnew.ExportSpecctraDSN(board, {output_path!r}); "
+        f"print('ok')"
+    )
     return output_path
 
 
 def import_ses(pcb_path: str, ses_path: str) -> str:
     """Import Specctra SES (routed session) back into PCB.
 
-    Note: Requires the pcbnew Python module.
+    Uses pcbnew via subprocess (auto-detects the Python that has pcbnew).
     """
-    try:
-        import pcbnew
-    except ImportError:
-        raise RuntimeError("SES import requires the pcbnew Python module.")
-    board = pcbnew.LoadBoard(pcb_path)
-    pcbnew.ImportSpecctraSES(board, ses_path)
+    _run_pcbnew(
+        f"import pcbnew; "
+        f"board = pcbnew.LoadBoard({pcb_path!r}); "
+        f"pcbnew.ImportSpecctraSES(board, {ses_path!r}); "
+        f"board.Save({pcb_path!r}); "
+        f"print('ok')"
+    )
     board.Save(pcb_path)
     return pcb_path
 
