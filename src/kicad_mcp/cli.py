@@ -195,7 +195,7 @@ def export_gerbers(file_path: str, output_dir: str) -> list[str]:
 
 def export_position_file(
     file_path: str, output_path: str, fmt: str = "csv", units: str = "mm",
-    smd_only: bool = True,
+    smd_only: bool = True, exclude_dnp: bool = True,
 ) -> str:
     """Export component position (pick-and-place) file."""
     cli = _find_kicad_cli()
@@ -208,6 +208,8 @@ def export_position_file(
     ]
     if smd_only:
         cmd.append("--smd-only")
+    if exclude_dnp:
+        cmd.append("--exclude-dnp")
     cmd.append(file_path)
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -276,11 +278,14 @@ def _generate_cpl(
 ) -> None:
     """Generate a fab-specific CPL (Component Placement List) file.
 
-    KiCad's position CSV has columns:
-    Ref, Val, Package, PosX, PosY, Rot, Side
+    KiCad's position CSV has columns: Ref, Val, Package, PosX, PosY, Rot, Side
+    Output columns: Designator, Mid X, Mid Y, Rotation, Layer
 
-    JLCPCB wants: Designator, Mid X, Mid Y, Rotation, Layer
-    PCBWay wants: Designator, Mid X, Mid Y, Rotation, Layer
+    Transformations (keep it simple — only negate Y):
+    - X: raw value, no mirroring for bottom components
+    - Y: negated (KiCad Y-down -> Gerber Y-up)
+    - Rotation: raw KiCad value, no correction (JLCPCB preview handles alignment)
+    - Units: mm suffix on coordinates
     """
     import csv
     import io
