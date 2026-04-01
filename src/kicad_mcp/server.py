@@ -699,6 +699,36 @@ def pcb_export_gerbers(file_path: str, output_dir: str) -> str:
     return json.dumps({"files": files})
 
 
+@mcp.tool()
+def pcb_export_manufacturing(
+    file_path: str,
+    output_dir: str,
+    format: str = "jlcpcb",
+    bom_path: str | None = None,
+) -> str:
+    """Export all manufacturing files for a fab house in one call.
+
+    Generates Gerbers, drill files, component placement (CPL), and BOM,
+    then zips everything into manufacturing.zip.
+
+    For JLCPCB format:
+    - CPL with columns: Designator, Mid X, Mid Y, Rotation, Layer
+    - BOM with columns: Comment, Designator, Footprint, LCSC Part Number
+    - Y coordinates negated to match Gerber coordinate system
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        output_dir: Output directory for all manufacturing files.
+        format: "jlcpcb" (default), "pcbway", or "raw" (Gerbers + drill only).
+        bom_path: Optional path to a BOM CSV with LCSC part numbers.
+
+    Returns JSON with list of generated files and zip path.
+    """
+    logger.info("pcb_export_manufacturing: %s format=%s", file_path, format)
+    result = cli.export_manufacturing(file_path, output_dir, format, bom_path)
+    return json.dumps(result)
+
+
 # ── Utility Tools ────────────────────────────────────────────────────────────
 
 
@@ -973,7 +1003,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (39 tools registered)")
+    logger.info("KiCad MCP server starting (40 tools registered)")
     mcp.run()
 
 

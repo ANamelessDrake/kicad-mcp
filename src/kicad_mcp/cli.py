@@ -193,6 +193,176 @@ def export_gerbers(file_path: str, output_dir: str) -> list[str]:
     return sorted(str(p) for p in Path(output_dir).iterdir() if p.is_file())
 
 
+def export_position_file(
+    file_path: str, output_path: str, fmt: str = "csv", units: str = "mm",
+    smd_only: bool = True,
+) -> str:
+    """Export component position (pick-and-place) file."""
+    cli = _find_kicad_cli()
+    if not cli:
+        raise RuntimeError("kicad-cli not found.")
+
+    cmd = [
+        cli, "pcb", "export", "pos",
+        "--format", fmt, "--units", units, "--output", output_path,
+    ]
+    if smd_only:
+        cmd.append("--smd-only")
+    cmd.append(file_path)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"Position file export failed: {result.stderr.strip()}")
+    return output_path
+
+
+def export_manufacturing(
+    file_path: str,
+    output_dir: str,
+    fmt: str = "jlcpcb",
+    bom_path: str | None = None,
+) -> dict:
+    """Export all manufacturing files for a fab house.
+
+    Args:
+        file_path: PCB file path.
+        output_dir: Output directory.
+        fmt: "jlcpcb", "pcbway", or "raw" (Gerbers + drill only).
+        bom_path: Optional BOM CSV with LCSC part numbers.
+
+    Returns dict with file list and zip path.
+    """
+    import zipfile
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    # 1. Export Gerbers + drill
+    gerber_files = export_gerbers(file_path, output_dir)
+
+    # 2. Export position file
+    pos_path = str(out / "positions.csv")
+    export_position_file(file_path, pos_path, fmt="csv", units="mm")
+
+    generated_files = list(gerber_files) + [pos_path]
+
+    if fmt == "raw":
+        return {"files": generated_files, "zip_path": None}
+
+    # 3. Generate fab-specific files
+    if fmt in ("jlcpcb", "pcbway"):
+        # Generate CPL (Component Placement List) from position file
+        cpl_path = str(out / f"cpl-{fmt}.csv")
+        _generate_cpl(pos_path, cpl_path, fmt)
+        generated_files.append(cpl_path)
+
+        # Generate BOM
+        bom_out_path = str(out / f"bom-{fmt}.csv")
+        _generate_bom(bom_path, bom_out_path, fmt)
+        generated_files.append(bom_out_path)
+
+    # 4. Zip everything
+    zip_path = str(out / "manufacturing.zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fpath in generated_files:
+            zf.write(fpath, Path(fpath).name)
+    generated_files.append(zip_path)
+
+    return {"files": generated_files, "zip_path": zip_path}
+
+
+def _generate_cpl(
+    pos_csv_path: str, output_path: str, fmt: str
+) -> None:
+    """Generate a fab-specific CPL (Component Placement List) file.
+
+    KiCad's position CSV has columns:
+    Ref, Val, Package, PosX, PosY, Rot, Side
+
+    JLCPCB wants: Designator, Mid X, Mid Y, Rotation, Layer
+    PCBWay wants: Designator, Mid X, Mid Y, Rotation, Layer
+    """
+    import csv
+    import io
+
+    rows: list[dict] = []
+    with open(pos_csv_path, "r") as f:
+        # KiCad CSV uses ',' delimiter, may have comment header lines starting with #
+        lines = [l for l in f if not l.startswith("#")]
+        reader = csv.DictReader(io.StringIO("".join(lines)))
+        for row in reader:
+            # Normalize column names (KiCad may use different casing/spacing)
+            ref = row.get("Ref", row.get("ref", row.get("Designator", "")))
+            pos_x = row.get("PosX", row.get("posx", row.get("Mid X", "0")))
+            pos_y = row.get("PosY", row.get("posy", row.get("Mid Y", "0")))
+            rot = row.get("Rot", row.get("rot", row.get("Rotation", "0")))
+            side = row.get("Side", row.get("side", row.get("Layer", "top")))
+
+            # JLCPCB/PCBWay: negate Y to match Gerber coordinates
+            try:
+                y_val = -float(pos_y.strip())
+            except (ValueError, AttributeError):
+                y_val = 0.0
+
+            try:
+                x_val = float(pos_x.strip())
+            except (ValueError, AttributeError):
+                x_val = 0.0
+
+            layer = "Top" if "top" in side.lower() or "front" in side.lower() else "Bottom"
+
+            rows.append({
+                "Designator": ref.strip(),
+                "Mid X": f"{x_val}mm",
+                "Mid Y": f"{y_val}mm",
+                "Rotation": rot.strip(),
+                "Layer": layer,
+            })
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["Designator", "Mid X", "Mid Y", "Rotation", "Layer"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _generate_bom(
+    bom_input_path: str | None, output_path: str, fmt: str
+) -> None:
+    """Generate a fab-specific BOM file.
+
+    If bom_input_path is provided, reads it and reformats.
+    Otherwise creates a stub BOM that the user can fill in with LCSC numbers.
+    """
+    import csv
+
+    if fmt == "jlcpcb":
+        fieldnames = ["Comment", "Designator", "Footprint", "LCSC Part Number"]
+    else:
+        fieldnames = ["Comment", "Designator", "Footprint", "Manufacturer Part"]
+
+    rows: list[dict] = []
+
+    if bom_input_path and Path(bom_input_path).exists():
+        with open(bom_input_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                comment = row.get("Value", row.get("Comment", row.get("value", "")))
+                designator = row.get("Reference", row.get("Designator", row.get("ref", "")))
+                footprint = row.get("Footprint", row.get("Package", row.get("footprint", "")))
+                lcsc = row.get("LCSC", row.get("LCSC Part Number", row.get("lcsc", "")))
+                rows.append({
+                    fieldnames[0]: comment,
+                    fieldnames[1]: designator,
+                    fieldnames[2]: footprint,
+                    fieldnames[3]: lcsc,
+                })
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def export_netlist(
     schematic_path: str, output_path: str, fmt: str = "kicadsexpr"
 ) -> str:
