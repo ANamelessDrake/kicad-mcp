@@ -831,3 +831,112 @@ def delete_by_uuid(file_path: str, target_uuid: str) -> bool:
     if found:
         write_file(file_path, root)
     return found
+
+
+def _get_fp_reference(fp_node: SexpList) -> str:
+    """Get the reference designator from a footprint node."""
+    for prop in fp_node.find_all("property"):
+        if len(prop.children) >= 3 and str(prop.children[1]) == "Reference":
+            return str(prop.children[2])
+    return ""
+
+
+def delete_footprint(
+    file_path: str, reference: str | None = None, target_uuid: str | None = None
+) -> dict:
+    """Delete a footprint by reference or UUID. Returns {deleted, reference}."""
+    if not reference and not target_uuid:
+        raise ValueError("Provide at least one of reference or uuid.")
+
+    root = parse_file(file_path)
+
+    for fp in list(root.children):
+        if not isinstance(fp, SexpList) or fp.tag != "footprint":
+            continue
+        fp_ref = _get_fp_reference(fp)
+        uuid_node = fp.find("uuid")
+        fp_uuid = str(uuid_node.children[1]) if uuid_node and len(uuid_node.children) >= 2 else ""
+
+        if (reference and fp_ref == reference) or (target_uuid and fp_uuid == target_uuid):
+            root.remove_child(fp)
+            write_file(file_path, root)
+            return {"deleted": True, "reference": fp_ref}
+
+    return {"deleted": False}
+
+
+def delete_footprints_batch(
+    file_path: str,
+    references: list[str] | None = None,
+    uuids: list[str] | None = None,
+) -> list[dict]:
+    """Delete multiple footprints in a single file read/write cycle."""
+    ref_set = set(references or [])
+    uuid_set = set(uuids or [])
+    if not ref_set and not uuid_set:
+        return []
+
+    root = parse_file(file_path)
+    results: list[dict] = []
+    to_remove: list[SexpList] = []
+
+    for fp in root.children:
+        if not isinstance(fp, SexpList) or fp.tag != "footprint":
+            continue
+        fp_ref = _get_fp_reference(fp)
+        uuid_node = fp.find("uuid")
+        fp_uuid = str(uuid_node.children[1]) if uuid_node and len(uuid_node.children) >= 2 else ""
+
+        if fp_ref in ref_set or fp_uuid in uuid_set:
+            to_remove.append(fp)
+            results.append({"deleted": True, "reference": fp_ref})
+            ref_set.discard(fp_ref)
+            uuid_set.discard(fp_uuid)
+
+    for fp in to_remove:
+        root.remove_child(fp)
+
+    # Report not-found entries
+    for r in (references or []):
+        if r not in {d["reference"] for d in results}:
+            results.append({"deleted": False, "reference": r})
+    for u in (uuids or []):
+        results.append({"deleted": False, "uuid": u})
+
+    if to_remove:
+        write_file(file_path, root)
+
+    return results
+
+
+def delete_elements_batch(
+    file_path: str, uuids: list[str], element_type: str | None = None
+) -> list[bool]:
+    """Delete multiple PCB elements by UUID in a single read/write cycle.
+
+    If element_type is specified ("segment", "via", "zone", etc.), only
+    matches top-level elements of that type. Otherwise matches any element.
+    """
+    if not uuids:
+        return []
+
+    root = parse_file(file_path)
+    target_set = set(uuids)
+    found: dict[str, bool] = {u: False for u in uuids}
+
+    for child in list(root.children):
+        if not isinstance(child, SexpList):
+            continue
+        if element_type and child.tag != element_type:
+            continue
+        uuid_node = child.find("uuid")
+        if uuid_node and len(uuid_node.children) >= 2:
+            child_uuid = str(uuid_node.children[1])
+            if child_uuid in target_set:
+                root.remove_child(child)
+                found[child_uuid] = True
+
+    if any(found.values()):
+        write_file(file_path, root)
+
+    return [found[u] for u in uuids]

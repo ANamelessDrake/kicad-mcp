@@ -639,6 +639,71 @@ def pcb_autoroute(
 
 
 @mcp.tool()
+def pcb_delete_footprint(
+    file_path: str, reference: str | None = None, uuid: str | None = None
+) -> str:
+    """Delete a footprint from the PCB by reference or UUID.
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        reference: Reference designator (e.g., "J1", "C2"). Optional if uuid provided.
+        uuid: UUID of the footprint. Optional if reference provided.
+
+    Returns whether the footprint was found and deleted.
+    """
+    result = pcb.delete_footprint(file_path, reference=reference, target_uuid=uuid)
+    return json.dumps(result)
+
+
+@mcp.tool()
+def pcb_delete_footprints(
+    file_path: str,
+    references: list[str] | None = None,
+    uuids: list[str] | None = None,
+) -> str:
+    """Delete multiple footprints in a single operation.
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        references: List of reference designators to delete.
+        uuids: List of UUIDs to delete.
+
+    Returns list of results for each deletion attempt.
+    """
+    results = pcb.delete_footprints_batch(file_path, references, uuids)
+    deleted_count = sum(1 for r in results if r.get("deleted"))
+    return json.dumps({"results": results, "deleted_count": deleted_count})
+
+
+@mcp.tool()
+def pcb_delete_traces(file_path: str, uuids: list[str]) -> str:
+    """Delete multiple traces (segments) by UUID in a single operation.
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        uuids: List of trace segment UUIDs to delete.
+
+    Returns list of booleans indicating which were found and deleted.
+    """
+    results = pcb.delete_elements_batch(file_path, uuids, element_type="segment")
+    return json.dumps({"results": results, "deleted_count": sum(results)})
+
+
+@mcp.tool()
+def pcb_delete_vias(file_path: str, uuids: list[str]) -> str:
+    """Delete multiple vias by UUID in a single operation.
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        uuids: List of via UUIDs to delete.
+
+    Returns list of booleans indicating which were found and deleted.
+    """
+    results = pcb.delete_elements_batch(file_path, uuids, element_type="via")
+    return json.dumps({"results": results, "deleted_count": sum(results)})
+
+
+@mcp.tool()
 def pcb_run_drc(file_path: str) -> str:
     """Run Design Rules Check (DRC) on a PCB using kicad-cli.
 
@@ -1003,7 +1068,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (40 tools registered)")
+    logger.info("KiCad MCP server starting (44 tools registered)")
     mcp.run()
 
 
