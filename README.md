@@ -24,6 +24,26 @@ An MCP (Model Context Protocol) server that allows LLMs to programmatically crea
 pip install -e ".[dev]"
 ```
 
+## Running the Server
+
+```bash
+python3.13 -m kicad_mcp.server
+```
+
+With debug logging:
+
+```bash
+KICAD_MCP_LOG_LEVEL=DEBUG python3.13 -m kicad_mcp.server
+```
+
+With optional log file:
+
+```bash
+KICAD_MCP_LOG_LEVEL=DEBUG KICAD_MCP_LOG_FILE=/tmp/kicad-mcp.log python3.13 -m kicad_mcp.server
+```
+
+Use Python 3.13 if KiCad 8 is installed — it includes the `pcbnew` module which enables DSN export for Freerouting autorouting. The server communicates over stdio (MCP protocol) and logs to stderr.
+
 ## Usage with Claude Code
 
 Add to your project's `.mcp.json` or `~/.claude.json`:
@@ -32,7 +52,7 @@ Add to your project's `.mcp.json` or `~/.claude.json`:
 {
   "mcpServers": {
     "kicad": {
-      "command": "python3",
+      "command": "python3.13",
       "args": ["-m", "kicad_mcp.server"],
       "env": {
         "PYTHONPATH": "/path/to/kicad-mcp/src",
@@ -45,7 +65,7 @@ Add to your project's `.mcp.json` or `~/.claude.json`:
 }
 ```
 
-Adjust `python3` to match your Python installation (e.g., `python3.12`) and update the `PYTHONPATH` to point to where you cloned this repo.
+Use the Python version that has KiCad's `pcbnew` module (typically Python 3.13 on Fedora with KiCad 8). Update the `PYTHONPATH` to point to where you cloned this repo.
 
 ## Environment Variables
 
