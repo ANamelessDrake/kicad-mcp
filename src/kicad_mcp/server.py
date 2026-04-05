@@ -374,6 +374,39 @@ def schematic_add_lib_symbol(
 
 
 @mcp.tool()
+def schematic_delete_lib_symbol(file_path: str, lib_id: str) -> str:
+    """Delete an unused symbol definition from the schematic's lib_symbols section.
+
+    Refuses to delete if any symbol instances still reference it.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        lib_id: Library ID to delete (e.g., "Connector_Generic:Conn_01x08").
+
+    Returns {deleted: true, lib_id} or {deleted: false, reason}.
+    """
+    result = schematic.delete_lib_symbol(file_path, lib_id)
+    return json.dumps(result)
+
+
+@mcp.tool()
+def schematic_cleanup_lib_symbols(file_path: str) -> str:
+    """Remove all orphaned lib_symbol definitions with no matching instances.
+
+    Finds lib_symbols that are defined but not referenced by any placed symbol,
+    and removes them. Useful after deleting components to clean up phantom ERC errors.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+
+    Returns JSON with list of removed lib_ids.
+    """
+    logger.info("schematic_cleanup_lib_symbols: %s", file_path)
+    removed = schematic.cleanup_lib_symbols(file_path)
+    return json.dumps({"removed": removed, "count": len(removed)})
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -1120,7 +1153,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (46 tools registered)")
+    logger.info("KiCad MCP server starting (48 tools registered)")
     mcp.run()
 
 

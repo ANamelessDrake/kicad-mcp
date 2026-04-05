@@ -587,6 +587,63 @@ def add_lib_symbol(
     return True
 
 
+def delete_lib_symbol(file_path: str, lib_id: str) -> dict:
+    """Delete a lib_symbol definition if no instances reference it."""
+    root = parse_file(file_path)
+
+    # Check if any symbol instances reference this lib_id
+    for sym in root.find_all("symbol"):
+        lid = sym.find("lib_id")
+        if lid and len(lid.children) >= 2 and str(lid.children[1]) == lib_id:
+            return {"deleted": False, "reason": "still in use"}
+
+    lib_symbols = root.find("lib_symbols")
+    if not lib_symbols:
+        return {"deleted": False, "reason": "not found"}
+
+    for child in list(lib_symbols.children):
+        if isinstance(child, SexpList) and child.tag == "symbol":
+            if len(child.children) >= 2 and str(child.children[1]) == lib_id:
+                lib_symbols.remove_child(child)
+                write_file(file_path, root)
+                return {"deleted": True, "lib_id": lib_id}
+
+    return {"deleted": False, "reason": "not found"}
+
+
+def cleanup_lib_symbols(file_path: str) -> list[str]:
+    """Remove all orphaned lib_symbol definitions with no matching instances.
+
+    Returns list of lib_ids that were removed.
+    """
+    root = parse_file(file_path)
+
+    # Collect all lib_ids referenced by symbol instances
+    used_lib_ids: set[str] = set()
+    for sym in root.find_all("symbol"):
+        lid = sym.find("lib_id")
+        if lid and len(lid.children) >= 2:
+            used_lib_ids.add(str(lid.children[1]))
+
+    lib_symbols = root.find("lib_symbols")
+    if not lib_symbols:
+        return []
+
+    removed: list[str] = []
+    for child in list(lib_symbols.children):
+        if isinstance(child, SexpList) and child.tag == "symbol":
+            if len(child.children) >= 2:
+                child_id = str(child.children[1])
+                if child_id not in used_lib_ids:
+                    lib_symbols.remove_child(child)
+                    removed.append(child_id)
+
+    if removed:
+        write_file(file_path, root)
+
+    return removed
+
+
 # ── Pin position lookup ─────────────────────────────────────────────────────
 
 
