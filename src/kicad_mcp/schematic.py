@@ -469,6 +469,124 @@ def add_no_connects_batch(file_path: str, positions: list[dict]) -> list[str]:
     return uuids
 
 
+def move_symbol(
+    file_path: str, reference: str, x: float, y: float, rotation: float | None = None
+) -> bool:
+    """Move an existing schematic symbol to a new position. Returns True if found."""
+    x = _snap_to_grid(x)
+    y = _snap_to_grid(y)
+    root = parse_file(file_path)
+
+    for sym in root.find_all("symbol"):
+        for prop in sym.find_all("property"):
+            if len(prop.children) >= 3 and str(prop.children[1]) == "Reference" and str(prop.children[2]) == reference:
+                at_node = sym.find("at")
+                if at_node:
+                    if rotation is not None:
+                        at_node.children = ["at", x, y, rotation]
+                    elif len(at_node.children) >= 4:
+                        at_node.children = ["at", x, y, at_node.children[3]]
+                    else:
+                        at_node.children = ["at", x, y, 0]
+                write_file(file_path, root)
+                return True
+    return False
+
+
+def add_lib_symbol(
+    file_path: str,
+    lib_id: str,
+    pins: list[dict],
+    rectangle: dict | None = None,
+    properties: dict | None = None,
+) -> bool:
+    """Add a custom symbol definition to the schematic's lib_symbols section.
+
+    Args:
+        lib_id: Library ID (e.g., "RF:CC1101").
+        pins: List of pin dicts with keys: number, name, type, x, y, rotation.
+              type is one of: input, output, passive, power_in, bidirectional, etc.
+        rectangle: Optional body rectangle with x1, y1, x2, y2.
+        properties: Optional dict of property name -> value (Reference, Value, etc.).
+
+    Returns True on success.
+    """
+    path = Path(file_path)
+    if path.exists():
+        root = parse_file(file_path)
+    else:
+        root = _make_empty_schematic()
+
+    lib_symbols = root.find("lib_symbols")
+    if lib_symbols is None:
+        lib_symbols = SexpList(["lib_symbols"])
+        root.children.insert(5, lib_symbols)
+
+    # Check if already present
+    for child in lib_symbols.children:
+        if isinstance(child, SexpList) and child.tag == "symbol":
+            if len(child.children) >= 2 and str(child.children[1]) == lib_id:
+                return True  # already exists
+
+    # Symbol name without library prefix for sub-symbols
+    parts = lib_id.split(":")
+    sym_name = parts[1] if len(parts) == 2 else lib_id
+
+    # Build properties
+    props = {"Reference": "U", "Value": sym_name, "Footprint": "", "Datasheet": "", "Description": ""}
+    if properties:
+        props.update(properties)
+
+    prop_sexp_parts: list[str] = []
+    for pname, pval in props.items():
+        hide = "(hide yes)" if pname in ("Footprint", "Datasheet", "Description") else ""
+        prop_sexp_parts.append(
+            f'(property "{esc(pname)}" "{esc(pval)}" (at 0 0 0) '
+            f'(effects (font (size 1.27 1.27)) {hide}))'
+        )
+    props_str = " ".join(prop_sexp_parts)
+
+    # Build _0_1 sub-symbol (graphics)
+    graphics = ""
+    if rectangle:
+        x1 = rectangle.get("x1", -5.08)
+        y1 = rectangle.get("y1", -5.08)
+        x2 = rectangle.get("x2", 5.08)
+        y2 = rectangle.get("y2", 5.08)
+        graphics = (
+            f'(rectangle (start {x1} {y1}) (end {x2} {y2}) '
+            f'(stroke (width 0.254) (type default)) (fill (type background)))'
+        )
+
+    # Build _1_1 sub-symbol (pins)
+    pin_parts: list[str] = []
+    for pin in pins:
+        pnum = pin["number"]
+        pname = pin.get("name", f"Pin_{pnum}")
+        ptype = pin.get("type", "passive")
+        px = pin.get("x", 0)
+        py = pin.get("y", 0)
+        prot = pin.get("rotation", 0)
+        pin_parts.append(
+            f'(pin {ptype} line (at {px} {py} {prot}) (length 2.54) '
+            f'(name "{esc(pname)}" (effects (font (size 1.27 1.27)))) '
+            f'(number "{esc(str(pnum))}" (effects (font (size 1.27 1.27)))))'
+        )
+    pins_str = " ".join(pin_parts)
+
+    sym_sexp = (
+        f'(symbol "{esc(lib_id)}" (in_bom yes) (on_board yes) '
+        f'{props_str} '
+        f'(symbol "{esc(sym_name)}_0_1" {graphics}) '
+        f'(symbol "{esc(sym_name)}_1_1" {pins_str}))'
+    )
+    sym_node = parse(sym_sexp)
+    lib_symbols.children.append(sym_node)
+
+    write_file(file_path, root)
+    return True
+
+
 # ── Pin position lookup ─────────────────────────────────────────────────────
 
 

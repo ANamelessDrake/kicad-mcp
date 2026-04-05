@@ -322,6 +322,58 @@ def schematic_annotate(file_path: str) -> str:
 
 
 @mcp.tool()
+def schematic_move_symbol(
+    file_path: str, reference: str, x: float, y: float, rotation: float | None = None
+) -> str:
+    """Move an existing schematic symbol to a new position.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        reference: Reference designator (e.g., "U1", "R1").
+        x: New X position in mm (snapped to 1.27mm grid).
+        y: New Y position in mm (snapped to 1.27mm grid).
+        rotation: New rotation in degrees (optional, keeps current if not specified).
+
+    Returns whether the symbol was found and moved.
+    """
+    ok = schematic.move_symbol(file_path, reference, x, y, rotation)
+    return json.dumps({"moved": ok})
+
+
+@mcp.tool()
+def schematic_add_lib_symbol(
+    file_path: str,
+    lib_id: str,
+    pins: list[dict],
+    rectangle: dict | None = None,
+    properties: dict | None = None,
+) -> str:
+    """Add a custom symbol definition to the schematic's lib_symbols section.
+
+    Use this for components not in KiCad's standard libraries. After adding,
+    use schematic_place_symbol to place instances referencing the same lib_id.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        lib_id: Library ID (e.g., "RF:CC1101").
+        pins: List of pin dicts, each with:
+              - number (str): Pin number
+              - name (str): Pin name
+              - type (str): Electrical type (input, output, passive, power_in, bidirectional, etc.)
+              - x (float): X position relative to symbol center
+              - y (float): Y position relative to symbol center
+              - rotation (float): Pin rotation in degrees (0=right, 90=up, 180=left, 270=down)
+        rectangle: Optional body rectangle {x1, y1, x2, y2} for the symbol outline.
+        properties: Optional dict of property name -> value (Reference, Value, Footprint, etc.).
+
+    Returns whether the symbol was added successfully.
+    """
+    logger.info("schematic_add_lib_symbol: %s with %d pins", lib_id, len(pins))
+    ok = schematic.add_lib_symbol(file_path, lib_id, pins, rectangle, properties)
+    return json.dumps({"added": ok})
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -1068,7 +1120,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (44 tools registered)")
+    logger.info("KiCad MCP server starting (46 tools registered)")
     mcp.run()
 
 
