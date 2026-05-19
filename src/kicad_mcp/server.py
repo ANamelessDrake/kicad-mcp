@@ -407,6 +407,94 @@ def schematic_cleanup_lib_symbols(file_path: str) -> str:
 
 
 @mcp.tool()
+def schematic_set_symbol_property(
+    file_path: str,
+    reference: str,
+    property_name: str,
+    value: str,
+    unit: int | None = None,
+) -> str:
+    """Set a property on a placed symbol instance without disturbing pins/wires.
+
+    Looks up the symbol by reference and replaces the named property's value.
+    Preserves the property's position and effects. Creates the property if it
+    doesn't exist (hidden by default).
+
+    If changing "Reference", the (instances ... reference ...) block is also
+    updated to match.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        reference: Reference designator (e.g., "U4", "R1").
+        property_name: "Footprint", "Value", "Reference", "Datasheet",
+                       "Description", or any custom field.
+        value: New value.
+        unit: For multi-unit symbols, specify which unit (default: error if ambiguous).
+
+    Returns {updated, old_value} or {updated: false, error, [units]}.
+    """
+    logger.info("schematic_set_symbol_property: %s.%s = %r", reference, property_name, value)
+    result = schematic.set_symbol_property(file_path, reference, property_name, value, unit)
+    return json.dumps(result)
+
+
+@mcp.tool()
+def schematic_set_lib_symbol_property(
+    file_path: str,
+    lib_id: str,
+    property_name: str,
+    value: str,
+) -> str:
+    """Set a property on a lib_symbol definition (the default for new instances).
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        lib_id: Library symbol ID (e.g., "Custom:AM32_ESC").
+        property_name: Property name to set.
+        value: New value.
+
+    Returns {updated, old_value} or {updated: false, error}.
+    """
+    logger.info("schematic_set_lib_symbol_property: %s.%s = %r", lib_id, property_name, value)
+    result = schematic.set_lib_symbol_property(file_path, lib_id, property_name, value)
+    return json.dumps(result)
+
+
+@mcp.tool()
+def schematic_list_symbols(file_path: str) -> str:
+    """Return a thin listing of all placed symbols (no pin details).
+
+    Cheaper than schematic_read when you only need {reference, value, lib_id,
+    footprint, x, y, rotation, unit, uuid} per symbol.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+
+    Returns JSON list of symbol summaries.
+    """
+    symbols = schematic.list_symbols(file_path)
+    return json.dumps({"symbols": symbols, "count": len(symbols)})
+
+
+@mcp.tool()
+def schematic_rename_label(file_path: str, old_name: str, new_name: str) -> str:
+    """Rename all labels matching old_name to new_name, preserving UUIDs.
+
+    Affects both local labels and global labels.
+
+    Args:
+        file_path: Path to the .kicad_sch file.
+        old_name: Current label text to match.
+        new_name: New label text.
+
+    Returns {renamed: int} with the count of labels renamed.
+    """
+    logger.info("schematic_rename_label: %r -> %r", old_name, new_name)
+    result = schematic.rename_label(file_path, old_name, new_name)
+    return json.dumps(result)
+
+
+@mcp.tool()
 def schematic_run_erc(file_path: str) -> str:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
@@ -1153,7 +1241,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (48 tools registered)")
+    logger.info("KiCad MCP server starting (52 tools registered)")
     mcp.run()
 
 

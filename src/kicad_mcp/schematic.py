@@ -587,6 +587,181 @@ def add_lib_symbol(
     return True
 
 
+def _find_symbol_instances(root: SexpList, reference: str) -> list[SexpList]:
+    """Find all symbol instances matching a reference designator."""
+    matches: list[SexpList] = []
+    for sym in root.find_all("symbol"):
+        for prop in sym.find_all("property"):
+            if len(prop.children) >= 3 and str(prop.children[1]) == "Reference" and str(prop.children[2]) == reference:
+                matches.append(sym)
+                break
+    return matches
+
+
+def _set_property_on_node(sym: SexpList, property_name: str, value: str) -> str | None:
+    """Set or create a property on a symbol/lib_symbol node.
+
+    Returns the old value if the property existed, or None if it was created.
+    Updates the (instances ... reference ...) block if changing Reference.
+    """
+    for prop in sym.find_all("property"):
+        if len(prop.children) >= 3 and str(prop.children[1]) == property_name:
+            old_value = str(prop.children[2])
+            prop.children[2] = QuotedString(value)
+            # If changing Reference, also update the instances block
+            if property_name == "Reference":
+                instances = sym.find("instances")
+                if instances:
+                    for proj in instances.find_all("project"):
+                        for path_node in proj.find_all("path"):
+                            ref_node = path_node.find("reference")
+                            if ref_node and len(ref_node.children) >= 2:
+                                ref_node.children[1] = QuotedString(value)
+            return old_value
+
+    # Property doesn't exist — create it with hidden defaults
+    new_prop = parse(
+        f'(property "{esc(property_name)}" "{esc(value)}" (at 0 0 0) '
+        f'(effects (font (size 1.27 1.27)) (hide yes)))'
+    )
+    # Insert after the last existing property, before pins
+    last_prop_idx = -1
+    for i, child in enumerate(sym.children):
+        if isinstance(child, SexpList) and child.tag == "property":
+            last_prop_idx = i
+    if last_prop_idx >= 0:
+        sym.children.insert(last_prop_idx + 1, new_prop)
+    else:
+        sym.children.append(new_prop)
+    return None
+
+
+def set_symbol_property(
+    file_path: str, reference: str, property_name: str, value: str, unit: int | None = None
+) -> dict:
+    """Set a property on a placed symbol instance, looked up by reference.
+
+    Returns {updated: bool, old_value: str|None}. If multiple units share the
+    reference (multi-unit symbol), pass `unit` to disambiguate.
+    """
+    root = parse_file(file_path)
+    matches = _find_symbol_instances(root, reference)
+
+    if not matches:
+        return {"updated": False, "error": f"No symbol with reference {reference!r}"}
+
+    if len(matches) > 1 and unit is None:
+        units: list[int] = []
+        for m in matches:
+            u_node = m.find("unit")
+            u = int(u_node.children[1]) if u_node and len(u_node.children) >= 2 else 1
+            units.append(u)
+        return {
+            "updated": False,
+            "error": f"Multiple units found for {reference!r}",
+            "units": units,
+        }
+
+    target = matches[0]
+    if len(matches) > 1:
+        for m in matches:
+            u_node = m.find("unit")
+            u = int(u_node.children[1]) if u_node and len(u_node.children) >= 2 else 1
+            if u == unit:
+                target = m
+                break
+
+    old = _set_property_on_node(target, property_name, value)
+    write_file(file_path, root)
+    return {"updated": True, "old_value": old}
+
+
+def set_lib_symbol_property(
+    file_path: str, lib_id: str, property_name: str, value: str
+) -> dict:
+    """Set a property on a lib_symbols definition (the default for new instances)."""
+    root = parse_file(file_path)
+    lib_symbols = root.find("lib_symbols")
+    if not lib_symbols:
+        return {"updated": False, "error": "no lib_symbols section"}
+
+    for child in lib_symbols.children:
+        if isinstance(child, SexpList) and child.tag == "symbol":
+            if len(child.children) >= 2 and str(child.children[1]) == lib_id:
+                old = _set_property_on_node(child, property_name, value)
+                write_file(file_path, root)
+                return {"updated": True, "old_value": old}
+
+    return {"updated": False, "error": f"lib_symbol {lib_id!r} not found"}
+
+
+def list_symbols(file_path: str) -> list[dict]:
+    """Return a thin listing of all placed symbols with key fields only."""
+    root = parse_file(file_path)
+    results: list[dict] = []
+
+    for sym in root.find_all("symbol"):
+        lib_id_node = sym.find("lib_id")
+        lib_id = str(lib_id_node.children[1]) if lib_id_node and len(lib_id_node.children) >= 2 else ""
+
+        at_node = sym.find("at")
+        x = float(at_node.children[1]) if at_node and len(at_node.children) >= 2 else 0.0
+        y = float(at_node.children[2]) if at_node and len(at_node.children) >= 3 else 0.0
+        rot = float(at_node.children[3]) if at_node and len(at_node.children) >= 4 else 0.0
+
+        uuid_node = sym.find("uuid")
+        sym_uuid = str(uuid_node.children[1]) if uuid_node and len(uuid_node.children) >= 2 else ""
+
+        unit_node = sym.find("unit")
+        unit = int(unit_node.children[1]) if unit_node and len(unit_node.children) >= 2 else 1
+
+        ref = value = footprint = ""
+        for prop in sym.find_all("property"):
+            if len(prop.children) >= 3:
+                pname = str(prop.children[1])
+                pval = str(prop.children[2])
+                if pname == "Reference":
+                    ref = pval
+                elif pname == "Value":
+                    value = pval
+                elif pname == "Footprint":
+                    footprint = pval
+
+        results.append({
+            "reference": ref,
+            "value": value,
+            "lib_id": lib_id,
+            "footprint": footprint,
+            "x": x,
+            "y": y,
+            "rotation": rot,
+            "unit": unit,
+            "uuid": sym_uuid,
+        })
+
+    return results
+
+
+def rename_label(file_path: str, old_name: str, new_name: str) -> dict:
+    """Rename labels matching old_name to new_name, preserving UUIDs.
+
+    Affects both (label ...) and (global_label ...) nodes.
+    Returns {renamed: int} with the count.
+    """
+    root = parse_file(file_path)
+    count = 0
+
+    for tag in ("label", "global_label"):
+        for lbl in root.find_all(tag):
+            if len(lbl.children) >= 2 and str(lbl.children[1]) == old_name:
+                lbl.children[1] = QuotedString(new_name)
+                count += 1
+
+    if count:
+        write_file(file_path, root)
+    return {"renamed": count}
+
+
 def delete_lib_symbol(file_path: str, lib_id: str) -> dict:
     """Delete a lib_symbol definition if no instances reference it."""
     root = parse_file(file_path)
