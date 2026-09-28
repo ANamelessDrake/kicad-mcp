@@ -6,6 +6,7 @@ import tempfile
 
 import pytest
 
+from tests.conftest import needs_footprint_libs, needs_kicad_cli, needs_symbol_libs
 from kicad_mcp.pcb import (
     add_mounting_hole,
     add_trace,
@@ -75,6 +76,7 @@ class TestReadPCB:
         assert pad_nets["2"] == "GND"
 
 
+@needs_footprint_libs
 class TestPlaceFootprint:
     def test_place_new(self, tmp_dir):
         path = os.path.join(tmp_dir, "new.kicad_pcb")
@@ -145,6 +147,7 @@ class TestAssignNet:
         assert pad1.net_name == "GND"
 
 
+@needs_footprint_libs
 class TestMountingHole:
     def test_add_hole(self, sample_pcb):
         uuid = add_mounting_hole(sample_pcb, 5, 5)
@@ -153,6 +156,7 @@ class TestMountingHole:
         assert len(data.footprints) == 2
 
 
+@needs_footprint_libs
 class TestPlaceFootprintArray:
     def test_grid_array(self, tmp_dir):
         path = os.path.join(tmp_dir, "array.kicad_pcb")
@@ -214,3 +218,238 @@ class TestDelete:
         assert delete_by_uuid(sample_pcb, trace_uuid)
         data2 = read_pcb(sample_pcb)
         assert len(data2.traces) == 0
+
+
+# ── Regression tests for the review fixes ───────────────────────────────────
+
+from kicad_mcp.pcb import (  # noqa: E402
+    autoroute,
+    delete_footprints_batch,
+    flip_footprint,
+)
+from kicad_mcp.sexp_parser import parse_file  # noqa: E402
+
+SOT23 = "Package_TO_SOT_SMD:SOT-23"
+
+
+def _fp_node(path, ref):
+    for fp in parse_file(path).find_all("footprint"):
+        for prop in fp.find_all("property"):
+            if str(prop.children[1]) == "Reference" and str(prop.children[2]) == ref:
+                return fp
+    raise AssertionError(ref)
+
+
+def _pad(fp, number):
+    pad = next(p for p in fp.find_all("pad") if str(p.children[1]) == number)
+    at = [float(v) for v in pad.find("at").children[1:]]
+    return at + [0.0] * (3 - len(at)), [str(v) for v in pad.find("layers").children[1:]]
+
+
+def _ref_text(fp):
+    prop = next(p for p in fp.find_all("property") if str(p.children[1]) == "Reference")
+    justify = prop.find("effects").find("justify")
+    mirrored = justify is not None and "mirror" in [str(c) for c in justify.children]
+    return [float(v) for v in prop.find("at").children[1:]], mirrored
+
+
+@needs_footprint_libs
+class TestFootprintGeometry:
+    """Expected values were produced by pcbnew (KiCad 8.0.9) for the same operations."""
+
+    def test_move_keeps_rotation(self, tmp_dir):
+        path = os.path.join(tmp_dir, "b.kicad_pcb")
+        place_footprint(path, SOT23, "Q1", "x", 50, 50, 30)
+        move_footprint(path, "Q1", 60, 40)
+        fp = read_pcb(path).footprints[0]
+        assert (fp.position.x, fp.position.y, fp.rotation) == (60, 40, 30)
+
+    def test_rotation_updates_pad_and_text_angles(self, tmp_dir):
+        path = os.path.join(tmp_dir, "b.kicad_pcb")
+        place_footprint(path, SOT23, "Q1", "x", 50, 50)
+        move_footprint(path, "Q1", 50, 50, 200)
+        fp = _fp_node(path, "Q1")
+        assert _pad(fp, "1")[0] == [-0.9375, -0.95, 200]
+        assert _ref_text(fp)[0] == [0, -2.4, -160]
+
+    def test_absolute_pad_positions_account_for_rotation(self, tmp_dir):
+        path = os.path.join(tmp_dir, "b.kicad_pcb")
+        place_footprint(path, SOT23, "Q1", "x", 50, 50, 30)
+        pad1 = next(p for p in read_pcb(path).footprints[0].pads if p.number == "1")
+        assert (round(pad1.absolute_position.x, 4), round(pad1.absolute_position.y, 4)) == (48.7131, 49.646)
+
+    def test_place_on_back_mirrors_and_moves_pads(self, tmp_dir):
+        path = os.path.join(tmp_dir, "b.kicad_pcb")
+        place_footprint(path, SOT23, "Q1", "x", 50, 50, 0, "B.Cu")
+        fp = _fp_node(path, "Q1")
+        at, layers = _pad(fp, "1")
+        assert at[:2] == [-0.9375, 0.95]
+        assert layers == ["B.Cu", "B.Paste", "B.Mask"]
+        pad1 = next(p for p in read_pcb(path).footprints[0].pads if p.number == "1")
+        assert (pad1.absolute_position.x, pad1.absolute_position.y) == (49.0625, 50.95)
+
+    def test_flip_rotated_footprint(self, tmp_dir):
+        path = os.path.join(tmp_dir, "b.kicad_pcb")
+        place_footprint(path, SOT23, "Q1", "x", 50, 50, 30)
+        assert flip_footprint(path, "Q1", "B.Cu")
+        fp = _fp_node(path, "Q1")
+        assert read_pcb(path).footprints[0].rotation == 150
+        assert _pad(fp, "1") == ([-0.9375, 0.95, 150], ["B.Cu", "B.Paste", "B.Mask"])
+        assert _ref_text(fp) == ([0, 2.4, 150], True)
+
+    def test_flip_twice_restores_front(self, tmp_dir):
+        path = os.path.join(tmp_dir, "b.kicad_pcb")
+        place_footprint(path, SOT23, "Q1", "x", 50, 50, 30)
+        original = parse_file(path)
+        flip_footprint(path, "Q1", "B.Cu")
+        flip_footprint(path, "Q1", "F.Cu")
+        restored = _fp_node(path, "Q1")
+        orig_fp = original.find("footprint")
+        assert _pad(restored, "1") == _pad(orig_fp, "1")
+        assert _ref_text(restored) == _ref_text(orig_fp)
+
+    def test_unknown_footprint_raises(self, tmp_dir):
+        with pytest.raises(ValueError, match="not found"):
+            place_footprint(os.path.join(tmp_dir, "b.kicad_pcb"), "Nope:Nothing", "R1", "x", 0, 0)
+
+    def test_duplicate_reference_raises(self, sample_pcb):
+        with pytest.raises(ValueError, match="already exists"):
+            place_footprint(sample_pcb, "Resistor_SMD:R_0603_1608Metric", "R1", "x", 0, 0)
+
+
+class TestBatchDelete:
+    @needs_footprint_libs
+    def test_results_per_request(self, sample_pcb):
+        u = place_footprint(sample_pcb, "Resistor_SMD:R_0603_1608Metric", "R2", "x", 30, 10)
+        results = delete_footprints_batch(sample_pcb, references=["R1", "R9"], uuids=[u, "missing"])
+        assert results == [
+            {"deleted": True, "reference": "R1"},
+            {"deleted": False, "reference": "R9"},
+            {"deleted": True, "uuid": u, "reference": "R2"},
+            {"deleted": False, "uuid": "missing"},
+        ]
+        assert read_pcb(sample_pcb).footprints == []
+
+
+class TestMountingHoles:
+    def test_unique_references(self, sample_pcb):
+        add_mounting_hole(sample_pcb, 5, 5)
+        add_mounting_hole(sample_pcb, 30, 50)
+        refs = sorted(f.reference for f in read_pcb(sample_pcb).footprints if f.reference.startswith("H"))
+        assert refs == ["H1", "H2"]
+
+    @needs_footprint_libs
+    def test_uses_library_footprint(self, sample_pcb):
+        add_mounting_hole(sample_pcb, 5, 5)
+        hole = next(f for f in read_pcb(sample_pcb).footprints if f.reference == "H1")
+        assert hole.footprint_lib == "MountingHole:MountingHole_3.2mm_M3_Pad"
+
+    def test_custom_size_is_generated(self, sample_pcb):
+        add_mounting_hole(sample_pcb, 5, 5, drill_size=2.7, pad_size=5.1)
+        fp = _fp_node(sample_pcb, "H1")
+        pad = fp.find("pad")
+        assert [float(v) for v in pad.find("size").children[1:]] == [5.1, 5.1]
+        assert float(pad.find("drill").children[1]) == 2.7
+
+
+class TestZones:
+    def test_hatch_fill(self, sample_pcb):
+        uuid = add_zone(sample_pcb, "GND", "F.Cu", [(0, 0), (10, 0), (10, 10)], "hatch")
+        zone = next(z for z in parse_file(sample_pcb).find_all("zone")
+                    if str(z.find("uuid").children[1]) == uuid)
+        assert str(zone.find("fill").find("mode").children[1]) == "hatch"
+
+    def test_invalid_fill_type_raises(self, sample_pcb):
+        with pytest.raises(ValueError, match="fill_type"):
+            add_zone(sample_pcb, "GND", "F.Cu", [(0, 0), (10, 0), (10, 10)], "checkerboard")
+
+
+class TestOutline:
+    def test_lines_are_chained_in_order(self, tmp_dir):
+        path = os.path.join(tmp_dir, "b.kicad_pcb")
+        set_board_outline(path, [(0, 0), (40, 0), (40, 30), (0, 30)])
+        # Shuffle the line order and reverse one line; the outline must still chain
+        root = parse_file(path)
+        lines = [c for c in root.children if getattr(c, "tag", None) == "gr_line"]
+        for line in lines:
+            root.remove_child(line)
+        start, end = lines[1].find("start"), lines[1].find("end")
+        start.children[1:], end.children[1:] = end.children[1:], start.children[1:]
+        for line in (lines[2], lines[0], lines[3], lines[1]):
+            root.append(line)
+        from kicad_mcp.sexp_parser import write_file
+        write_file(path, root)
+        outline = [(p.x, p.y) for p in read_pcb(path).board_outline]
+        assert len(outline) == 4
+        assert set(outline) == {(0, 0), (40, 0), (40, 30), (0, 30)}
+        # consecutive points share an edge (axis-aligned rectangle)
+        for (x1, y1), (x2, y2) in zip(outline, outline[1:] + outline[:1]):
+            assert x1 == x2 or y1 == y2
+
+
+@needs_footprint_libs
+class TestSimpleAutoroute:
+    def test_idempotent_and_uses_rotated_positions(self, tmp_dir):
+        path = os.path.join(tmp_dir, "b.kicad_pcb")
+        place_footprint(path, "Resistor_SMD:R_0603_1608Metric", "R1", "x", 10, 10, 90)
+        place_footprint(path, "Resistor_SMD:R_0603_1608Metric", "R2", "x", 20, 10)
+        assign_net_to_pad(path, "R1", "1", "SIG")
+        assign_net_to_pad(path, "R2", "1", "SIG")
+        first = autoroute(path, strategy="simple")
+        assert first["traces_added"] >= 1
+        pads = {f.reference: next(p for p in f.pads if p.number == "1").absolute_position
+                for f in read_pcb(path).footprints}
+        ends = {(round(t.start.x, 4), round(t.start.y, 4)) for t in read_pcb(path).traces}
+        ends |= {(round(t.end.x, 4), round(t.end.y, 4)) for t in read_pcb(path).traces}
+        assert (round(pads["R1"].x, 4), round(pads["R1"].y, 4)) in ends
+        second = autoroute(path, strategy="simple")
+        assert (second["traces_added"], second["vias_added"]) == (0, 0)
+
+    def test_unknown_strategy_raises(self, sample_pcb):
+        with pytest.raises(ValueError, match="strategy"):
+            autoroute(sample_pcb, strategy="magic")
+
+
+@needs_footprint_libs
+@needs_symbol_libs
+class TestSyncFromSchematic:
+    @pytest.fixture
+    def project(self, tmp_dir):
+        from kicad_mcp import schematic
+
+        sch = os.path.join(tmp_dir, "p.kicad_sch")
+        schematic.place_symbol(sch, "Device:R", "R1", "1k", "Resistor_SMD:R_0603_1608Metric", 50.8, 50.8)
+        schematic.place_symbol(sch, "Device:R", "R2", "1k", "", 76.2, 50.8)
+        pins = {p["pin_number"]: p for p in schematic.get_pin_positions(sch, "R1")}
+        schematic.add_label(sch, "SIG", pins["1"]["x"], pins["1"]["y"])
+        schematic.add_power_symbol(sch, "GND", pins["2"]["x"], pins["2"]["y"])
+        return sch, os.path.join(tmp_dir, "p.kicad_pcb")
+
+    @needs_kicad_cli
+    def test_sync_reports_only_new_nets(self, project):
+        from kicad_mcp.pcb import sync_from_schematic
+
+        sch, board = project
+        first = sync_from_schematic(sch, board)
+        assert first["netlist_source"] == "kicad-cli"
+        assert "GND" in first["added_nets"] and "/SIG" in first["added_nets"]
+        assert first["added_footprints"] == ["R1"]
+        assert first["skipped_footprints"] == [{"ref": "R2", "reason": "no footprint assigned"}]
+        assert first["updated_pads"] == 2
+        second = sync_from_schematic(sch, board)
+        assert second["added_nets"] == [] and second["added_footprints"] == []
+
+    def test_fallback_is_reported(self, project, monkeypatch):
+        from kicad_mcp import cli
+        from kicad_mcp.pcb import sync_from_schematic
+
+        def fail(*_a, **_k):
+            raise RuntimeError("kicad-cli not found.")
+
+        monkeypatch.setattr(cli, "export_netlist", fail)
+        sch, board = project
+        result = sync_from_schematic(sch, board)
+        assert result["netlist_source"] == "schematic"
+        assert result["updated_pads"] == 0
+        assert "pad nets were not updated" in result["warnings"][0]
+        assert result["added_footprints"] == ["R1"]

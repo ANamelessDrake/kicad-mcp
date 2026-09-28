@@ -5,7 +5,6 @@ Run with: python -m kicad_mcp.server
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import signal
@@ -30,6 +29,8 @@ def _configure_logging() -> logging.Logger:
         datefmt="%H:%M:%S",
     ))
     _logger.addHandler(stderr_handler)
+    # Don't also emit through the root logger (FastMCP configures one)
+    _logger.propagate = False
 
     # Optional file logging
     log_file = os.environ.get("KICAD_MCP_LOG_FILE")
@@ -55,7 +56,7 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def schematic_read(file_path: str) -> str:
+def schematic_read(file_path: str) -> dict:
     """Read and parse a .kicad_sch file.
 
     Returns structured JSON with components (ref, value, footprint, position, pins),
@@ -63,7 +64,7 @@ def schematic_read(file_path: str) -> str:
     """
     logger.info("schematic_read: %s", file_path)
     data = schematic.read_schematic(file_path)
-    return json.dumps(asdict(data), indent=2)
+    return asdict(data)
 
 
 @mcp.tool()
@@ -76,7 +77,8 @@ def schematic_place_symbol(
     x: float,
     y: float,
     rotation: float = 0,
-) -> str:
+    unit: int = 1,
+) -> dict:
     """Place a component symbol in the schematic.
 
     Args:
@@ -85,36 +87,47 @@ def schematic_place_symbol(
         reference: Reference designator (e.g., "R1", "C1").
         value: Component value (e.g., "10K", "100nF").
         footprint: Footprint library ID (e.g., "Resistor_SMD:R_0603_1608Metric").
-        x: X position in mm.
-        y: Y position in mm.
-        rotation: Rotation in degrees (default 0).
+        x: X position in mm (snapped to the 1.27 mm grid).
+        y: Y position in mm (snapped to the 1.27 mm grid).
+        rotation: Rotation in degrees, counterclockwise (default 0).
+        unit: Unit to place for multi-unit parts (e.g. 2 for the second op-amp
+              of an LM358). Place each unit with the same reference.
+
+    Fails if the symbol isn't in the schematic or KiCad's libraries, or if
+    the same reference and unit are already placed.
 
     Returns the UUID of the placed symbol.
     """
     logger.info("schematic_place_symbol: %s %s at (%s,%s)", lib_id, reference, x, y)
-    uuid = schematic.place_symbol(file_path, lib_id, reference, value, footprint, x, y, rotation)
-    return json.dumps({"uuid": uuid})
+    uuid = schematic.place_symbol(
+        file_path, lib_id, reference, value, footprint, x, y, rotation, unit
+    )
+    return {"uuid": uuid}
 
 
 @mcp.tool()
-def schematic_add_wire(file_path: str, points: list[list[float]]) -> str:
+def schematic_add_wire(
+    file_path: str, points: list[list[float]], snap: bool = True
+) -> dict:
     """Add a wire between a series of (x, y) points.
 
     Args:
         file_path: Path to the .kicad_sch file.
         points: List of [x, y] coordinate pairs in mm.
+        snap: Snap coordinates to the 1.27 mm grid (default true). Pass false
+              when targeting off-grid pins reported by schematic_get_pin_positions.
 
-    Returns the UUID of the wire.
+    Returns the UUID of the last wire segment.
     """
     pts = [(p[0], p[1]) for p in points]
-    uuid = schematic.add_wire(file_path, pts)
-    return json.dumps({"uuid": uuid})
+    uuid = schematic.add_wire(file_path, pts, snap)
+    return {"uuid": uuid}
 
 
 @mcp.tool()
 def schematic_add_label(
-    file_path: str, name: str, x: float, y: float, rotation: float = 0
-) -> str:
+    file_path: str, name: str, x: float, y: float, rotation: float = 0, snap: bool = True
+) -> dict:
     """Add a net label at a position in the schematic.
 
     Args:
@@ -123,36 +136,46 @@ def schematic_add_label(
         x: X position in mm.
         y: Y position in mm.
         rotation: Rotation in degrees (default 0).
+        snap: Snap coordinates to the 1.27 mm grid (default true). Pass false
+              when targeting off-grid pins reported by schematic_get_pin_positions.
 
     Returns the UUID of the label.
     """
-    uuid = schematic.add_label(file_path, name, x, y, rotation)
-    return json.dumps({"uuid": uuid})
+    uuid = schematic.add_label(file_path, name, x, y, rotation, snap)
+    return {"uuid": uuid}
 
 
 @mcp.tool()
 def schematic_add_power_symbol(
-    file_path: str, name: str, x: float, y: float, rotation: float = 0
-) -> str:
-    """Add a power port symbol (GND, 3V3, 5V, etc.) at a position.
+    file_path: str, name: str, x: float, y: float, rotation: float = 0, snap: bool = True
+) -> dict:
+    """Add a power port symbol (GND, +3V3, +5V, etc.) at a position.
 
     Args:
         file_path: Path to the .kicad_sch file.
-        name: Power net name (e.g., "GND", "3V3", "5V").
+        name: Symbol name in KiCad's power library (e.g., "GND", "+3V3", "+5V").
         x: X position in mm.
         y: Y position in mm.
         rotation: Rotation in degrees (default 0).
+        snap: Snap coordinates to the 1.27 mm grid (default true). Pass false
+              when targeting off-grid pins reported by schematic_get_pin_positions.
 
     Returns the UUID of the power symbol.
     """
-    uuid = schematic.add_power_symbol(file_path, name, x, y, rotation)
-    return json.dumps({"uuid": uuid})
+    uuid = schematic.add_power_symbol(file_path, name, x, y, rotation, snap)
+    return {"uuid": uuid}
 
 
 @mcp.tool()
 def schematic_add_global_label(
-    file_path: str, name: str, x: float, y: float, rotation: float = 0
-) -> str:
+    file_path: str,
+    name: str,
+    x: float,
+    y: float,
+    rotation: float = 0,
+    snap: bool = True,
+    shape: str = "input",
+) -> dict:
     """Add a global label for inter-sheet connectivity.
 
     Args:
@@ -161,15 +184,18 @@ def schematic_add_global_label(
         x: X position in mm.
         y: Y position in mm.
         rotation: Rotation in degrees (default 0).
+        snap: Snap coordinates to the 1.27 mm grid (default true). Pass false
+              when targeting off-grid pins reported by schematic_get_pin_positions.
+        shape: input, output, bidirectional, tri_state or passive (default input).
 
     Returns the UUID of the global label.
     """
-    uuid = schematic.add_global_label(file_path, name, x, y, rotation)
-    return json.dumps({"uuid": uuid})
+    uuid = schematic.add_global_label(file_path, name, x, y, rotation, snap, shape)
+    return {"uuid": uuid}
 
 
 @mcp.tool()
-def schematic_delete(file_path: str, uuid: str) -> str:
+def schematic_delete(file_path: str, uuid: str) -> dict:
     """Delete any schematic element by UUID.
 
     Args:
@@ -179,27 +205,29 @@ def schematic_delete(file_path: str, uuid: str) -> str:
     Returns whether the element was found and deleted.
     """
     found = schematic.delete_by_uuid(file_path, uuid)
-    return json.dumps({"deleted": found})
+    return {"deleted": found}
 
 
 @mcp.tool()
-def schematic_add_labels(file_path: str, labels: list[dict]) -> str:
+def schematic_add_labels(file_path: str, labels: list[dict], snap: bool = True) -> dict:
     """Add multiple net labels in a single operation (one file read/write cycle).
 
     Args:
         file_path: Path to the .kicad_sch file.
         labels: List of label dicts, each with keys: name (str), x (float), y (float),
                 and optionally rotation (float, default 0).
+        snap: Snap coordinates to the 1.27 mm grid (default true). Pass false
+              when targeting off-grid pins reported by schematic_get_pin_positions.
 
     Returns JSON with list of UUIDs.
     """
     logger.info("schematic_add_labels: %d labels", len(labels))
-    uuids = schematic.add_labels_batch(file_path, labels)
-    return json.dumps({"uuids": uuids, "count": len(uuids)})
+    uuids = schematic.add_labels_batch(file_path, labels, snap)
+    return {"uuids": uuids, "count": len(uuids)}
 
 
 @mcp.tool()
-def schematic_delete_many(file_path: str, uuids: list[str]) -> str:
+def schematic_delete_many(file_path: str, uuids: list[str]) -> dict:
     """Delete multiple schematic elements by UUID in a single operation.
 
     Args:
@@ -210,80 +238,94 @@ def schematic_delete_many(file_path: str, uuids: list[str]) -> str:
     """
     logger.info("schematic_delete_many: %d uuids", len(uuids))
     results = schematic.delete_many(file_path, uuids)
-    return json.dumps({"results": results, "deleted_count": sum(results)})
+    return {"results": results, "deleted_count": sum(results)}
 
 
 @mcp.tool()
-def schematic_add_power_symbols(file_path: str, symbols: list[dict]) -> str:
+def schematic_add_power_symbols(
+    file_path: str, symbols: list[dict], snap: bool = True
+) -> dict:
     """Add multiple power symbols in a single operation (one file read/write cycle).
 
     Args:
         file_path: Path to the .kicad_sch file.
-        symbols: List of dicts, each with keys: name (str, e.g. "GND", "3V3"),
+        symbols: List of dicts, each with keys: name (str, e.g. "GND", "+3V3"),
                  x (float), y (float), and optionally rotation (float, default 0).
+        snap: Snap coordinates to the 1.27 mm grid (default true). Pass false
+              when targeting off-grid pins reported by schematic_get_pin_positions.
 
     Returns JSON with list of UUIDs.
     """
     logger.info("schematic_add_power_symbols: %d symbols", len(symbols))
-    uuids = schematic.add_power_symbols_batch(file_path, symbols)
-    return json.dumps({"uuids": uuids, "count": len(uuids)})
+    uuids = schematic.add_power_symbols_batch(file_path, symbols, snap)
+    return {"uuids": uuids, "count": len(uuids)}
 
 
 @mcp.tool()
-def schematic_get_pin_positions(file_path: str, reference: str) -> str:
+def schematic_get_pin_positions(
+    file_path: str, reference: str, unit: int | None = None
+) -> dict:
     """Get the actual pin endpoint positions for a component in schematic coordinates.
 
-    Reads the component's position and rotation, looks up pin offsets from the
-    lib_symbols definition, and applies the rotation transform. Use this to find
-    the exact coordinates where labels and wires should connect to a component.
-
-    Handles extended symbols that inherit pins from a parent definition.
+    Reads the component's position, rotation and mirroring, looks up pin
+    offsets from the lib_symbols definition, and applies the same transform
+    KiCad does. Use this to find the exact coordinates where labels and wires
+    should connect to a component.
 
     Args:
         file_path: Path to the .kicad_sch file.
         reference: Reference designator (e.g., "R1", "U1", "J1").
+        unit: For multi-unit parts, only this unit (default: all placed units).
 
-    Returns JSON list of {pin_number, pin_name, x, y} for each pin.
+    Returns JSON list of {pin_number, pin_name, unit, x, y} for each pin.
     """
     logger.info("schematic_get_pin_positions: %s in %s", reference, file_path)
-    pins = schematic.get_pin_positions(file_path, reference)
-    return json.dumps({"pins": pins, "count": len(pins)})
+    pins = schematic.get_pin_positions(file_path, reference, unit)
+    return {"pins": pins, "count": len(pins)}
 
 
 @mcp.tool()
-def schematic_add_no_connect(file_path: str, x: float, y: float) -> str:
+def schematic_add_no_connect(
+    file_path: str, x: float, y: float, snap: bool = True
+) -> dict:
     """Add a no-connect (X) flag at a pin position.
 
     Args:
         file_path: Path to the .kicad_sch file.
-        x: X position in mm (snapped to grid).
-        y: Y position in mm (snapped to grid).
+        x: X position in mm.
+        y: Y position in mm.
+        snap: Snap coordinates to the 1.27 mm grid (default true). Pass false
+              when targeting off-grid pins reported by schematic_get_pin_positions.
 
     Returns the UUID of the no-connect flag.
     """
-    uuid = schematic.add_no_connect(file_path, x, y)
-    return json.dumps({"uuid": uuid})
+    uuid = schematic.add_no_connect(file_path, x, y, snap)
+    return {"uuid": uuid}
 
 
 @mcp.tool()
-def schematic_add_no_connects(file_path: str, positions: list[dict]) -> str:
+def schematic_add_no_connects(
+    file_path: str, positions: list[dict], snap: bool = True
+) -> dict:
     """Add multiple no-connect flags in a single operation.
 
     Args:
         file_path: Path to the .kicad_sch file.
         positions: List of dicts with keys: x (float), y (float).
+        snap: Snap coordinates to the 1.27 mm grid (default true). Pass false
+              when targeting off-grid pins reported by schematic_get_pin_positions.
 
     Returns JSON with list of UUIDs.
     """
     logger.info("schematic_add_no_connects: %d positions", len(positions))
-    uuids = schematic.add_no_connects_batch(file_path, positions)
-    return json.dumps({"uuids": uuids, "count": len(uuids)})
+    uuids = schematic.add_no_connects_batch(file_path, positions, snap)
+    return {"uuids": uuids, "count": len(uuids)}
 
 
 @mcp.tool()
 def schematic_modify_lib_symbol_pin(
     file_path: str, lib_id: str, pin_number: str, pin_type: str
-) -> str:
+) -> dict:
     """Modify a pin's electrical type in the schematic's lib_symbols section.
 
     Use this to fix ERC conflicts by changing a pin's type (e.g., changing an
@@ -297,19 +339,20 @@ def schematic_modify_lib_symbol_pin(
                   tri_state, passive, free, unspecified, power_in, power_out,
                   open_collector, open_emitter, no_connect.
 
-    Returns whether the pin was found and modified.
+    Returns whether the pin was found and modified; an invalid pin_type is an error.
     """
     logger.info("schematic_modify_lib_symbol_pin: %s pin %s -> %s", lib_id, pin_number, pin_type)
     ok = schematic.modify_lib_symbol_pin(file_path, lib_id, pin_number, pin_type)
-    return json.dumps({"modified": ok})
+    return {"modified": ok}
 
 
 @mcp.tool()
-def schematic_annotate(file_path: str) -> str:
+def schematic_annotate(file_path: str) -> dict:
     """Assign reference designators to unannotated symbols.
 
     Finds all symbols with '?' in their reference (e.g., R?, C?, U?), and assigns
-    sequential numbers per prefix, avoiding numbers already in use.
+    sequential numbers per prefix, avoiding numbers already in use. Units of a
+    multi-unit part (same lib_id and value) share one designator, like KiCad.
 
     Args:
         file_path: Path to the .kicad_sch file.
@@ -318,13 +361,18 @@ def schematic_annotate(file_path: str) -> str:
     """
     logger.info("schematic_annotate: %s", file_path)
     result = schematic.annotate(file_path)
-    return json.dumps(result)
+    return result
 
 
 @mcp.tool()
 def schematic_move_symbol(
-    file_path: str, reference: str, x: float, y: float, rotation: float | None = None
-) -> str:
+    file_path: str,
+    reference: str,
+    x: float,
+    y: float,
+    rotation: float | None = None,
+    unit: int | None = None,
+) -> dict:
     """Move an existing schematic symbol to a new position.
 
     Args:
@@ -333,11 +381,15 @@ def schematic_move_symbol(
         x: New X position in mm (snapped to 1.27mm grid).
         y: New Y position in mm (snapped to 1.27mm grid).
         rotation: New rotation in degrees (optional, keeps current if not specified).
+        unit: Which unit to move, required when a multi-unit part has several
+              placed units.
+
+    The symbol's fields (reference, value text) move with it.
 
     Returns whether the symbol was found and moved.
     """
-    ok = schematic.move_symbol(file_path, reference, x, y, rotation)
-    return json.dumps({"moved": ok})
+    ok = schematic.move_symbol(file_path, reference, x, y, rotation, unit)
+    return {"moved": ok}
 
 
 @mcp.tool()
@@ -347,7 +399,7 @@ def schematic_add_lib_symbol(
     pins: list[dict],
     rectangle: dict | None = None,
     properties: dict | None = None,
-) -> str:
+) -> dict:
     """Add a custom symbol definition to the schematic's lib_symbols section.
 
     Use this for components not in KiCad's standard libraries. After adding,
@@ -359,22 +411,25 @@ def schematic_add_lib_symbol(
         pins: List of pin dicts, each with:
               - number (str): Pin number
               - name (str): Pin name
-              - type (str): Electrical type (input, output, passive, power_in, bidirectional, etc.)
+              - type (str): Electrical type: input, output, bidirectional, tri_state,
+                passive, free, unspecified, power_in, power_out, open_collector,
+                open_emitter or no_connect
               - x (float): X position relative to symbol center
               - y (float): Y position relative to symbol center
               - rotation (float): Pin rotation in degrees (0=right, 90=up, 180=left, 270=down)
         rectangle: Optional body rectangle {x1, y1, x2, y2} for the symbol outline.
         properties: Optional dict of property name -> value (Reference, Value, Footprint, etc.).
 
-    Returns whether the symbol was added successfully.
+    Returns {added: true}, or {added: false} if the lib_id already exists.
+    Invalid pin definitions are an error.
     """
     logger.info("schematic_add_lib_symbol: %s with %d pins", lib_id, len(pins))
     ok = schematic.add_lib_symbol(file_path, lib_id, pins, rectangle, properties)
-    return json.dumps({"added": ok})
+    return {"added": ok}
 
 
 @mcp.tool()
-def schematic_delete_lib_symbol(file_path: str, lib_id: str) -> str:
+def schematic_delete_lib_symbol(file_path: str, lib_id: str) -> dict:
     """Delete an unused symbol definition from the schematic's lib_symbols section.
 
     Refuses to delete if any symbol instances still reference it.
@@ -386,11 +441,11 @@ def schematic_delete_lib_symbol(file_path: str, lib_id: str) -> str:
     Returns {deleted: true, lib_id} or {deleted: false, reason}.
     """
     result = schematic.delete_lib_symbol(file_path, lib_id)
-    return json.dumps(result)
+    return result
 
 
 @mcp.tool()
-def schematic_cleanup_lib_symbols(file_path: str) -> str:
+def schematic_cleanup_lib_symbols(file_path: str) -> dict:
     """Remove all orphaned lib_symbol definitions with no matching instances.
 
     Finds lib_symbols that are defined but not referenced by any placed symbol,
@@ -403,7 +458,7 @@ def schematic_cleanup_lib_symbols(file_path: str) -> str:
     """
     logger.info("schematic_cleanup_lib_symbols: %s", file_path)
     removed = schematic.cleanup_lib_symbols(file_path)
-    return json.dumps({"removed": removed, "count": len(removed)})
+    return {"removed": removed, "count": len(removed)}
 
 
 @mcp.tool()
@@ -413,7 +468,7 @@ def schematic_set_symbol_property(
     property_name: str,
     value: str,
     unit: int | None = None,
-) -> str:
+) -> dict:
     """Set a property on a placed symbol instance without disturbing pins/wires.
 
     Looks up the symbol by reference and replaces the named property's value.
@@ -429,13 +484,14 @@ def schematic_set_symbol_property(
         property_name: "Footprint", "Value", "Reference", "Datasheet",
                        "Description", or any custom field.
         value: New value.
-        unit: For multi-unit symbols, specify which unit (default: error if ambiguous).
+        unit: For multi-unit symbols, change only this unit. By default the change
+              applies to all placed units; Reference always applies to all units.
 
-    Returns {updated, old_value} or {updated: false, error, [units]}.
+    Returns {updated, old_value, units} or {updated: false, error, [units]}.
     """
     logger.info("schematic_set_symbol_property: %s.%s = %r", reference, property_name, value)
     result = schematic.set_symbol_property(file_path, reference, property_name, value, unit)
-    return json.dumps(result)
+    return result
 
 
 @mcp.tool()
@@ -444,7 +500,7 @@ def schematic_set_lib_symbol_property(
     lib_id: str,
     property_name: str,
     value: str,
-) -> str:
+) -> dict:
     """Set a property on a lib_symbol definition (the default for new instances).
 
     Args:
@@ -457,11 +513,11 @@ def schematic_set_lib_symbol_property(
     """
     logger.info("schematic_set_lib_symbol_property: %s.%s = %r", lib_id, property_name, value)
     result = schematic.set_lib_symbol_property(file_path, lib_id, property_name, value)
-    return json.dumps(result)
+    return result
 
 
 @mcp.tool()
-def schematic_list_symbols(file_path: str) -> str:
+def schematic_list_symbols(file_path: str) -> dict:
     """Return a thin listing of all placed symbols (no pin details).
 
     Cheaper than schematic_read when you only need {reference, value, lib_id,
@@ -473,11 +529,11 @@ def schematic_list_symbols(file_path: str) -> str:
     Returns JSON list of symbol summaries.
     """
     symbols = schematic.list_symbols(file_path)
-    return json.dumps({"symbols": symbols, "count": len(symbols)})
+    return {"symbols": symbols, "count": len(symbols)}
 
 
 @mcp.tool()
-def schematic_rename_label(file_path: str, old_name: str, new_name: str) -> str:
+def schematic_rename_label(file_path: str, old_name: str, new_name: str) -> dict:
     """Rename all labels matching old_name to new_name, preserving UUIDs.
 
     Affects both local labels and global labels.
@@ -491,25 +547,25 @@ def schematic_rename_label(file_path: str, old_name: str, new_name: str) -> str:
     """
     logger.info("schematic_rename_label: %r -> %r", old_name, new_name)
     result = schematic.rename_label(file_path, old_name, new_name)
-    return json.dumps(result)
+    return result
 
 
 @mcp.tool()
-def schematic_run_erc(file_path: str) -> str:
+def schematic_run_erc(file_path: str) -> dict:
     """Run Electrical Rules Check (ERC) on a schematic using kicad-cli.
 
-    Returns a list of violations with severity, message, and location.
+    Returns {violations: [{severity, message, location}], count}.
     Requires KiCad 8 to be installed.
     """
     violations = cli.run_erc(file_path)
-    return json.dumps([asdict(v) for v in violations], indent=2)
+    return {"violations": [asdict(v) for v in violations], "count": len(violations)}
 
 
 # ── PCB Tools ────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def pcb_read(file_path: str) -> str:
+def pcb_read(file_path: str) -> dict:
     """Read and parse a .kicad_pcb file.
 
     Returns structured JSON with footprints (ref, position, rotation, layer, pad nets),
@@ -517,7 +573,7 @@ def pcb_read(file_path: str) -> str:
     """
     logger.info("pcb_read: %s", file_path)
     data = pcb.read_pcb(file_path)
-    return json.dumps(asdict(data), indent=2)
+    return asdict(data)
 
 
 @mcp.tool()
@@ -530,7 +586,7 @@ def pcb_place_footprint(
     y: float,
     rotation: float = 0,
     layer: str = "F.Cu",
-) -> str:
+) -> dict:
     """Place a footprint on the PCB.
 
     Args:
@@ -540,20 +596,23 @@ def pcb_place_footprint(
         value: Component value (e.g., "10K").
         x: X position in mm.
         y: Y position in mm.
-        rotation: Rotation in degrees (default 0).
-        layer: Placement layer (default "F.Cu").
+        rotation: Footprint orientation in degrees (default 0).
+        layer: "F.Cu" or "B.Cu" (default "F.Cu"); back-side parts are mirrored
+               like KiCad's flip.
+
+    Fails if the footprint isn't in KiCad's libraries or the reference exists.
 
     Returns the UUID of the placed footprint.
     """
     logger.info("pcb_place_footprint: %s %s at (%s,%s)", footprint_lib, reference, x, y)
     uuid = pcb.place_footprint(file_path, footprint_lib, reference, value, x, y, rotation, layer)
-    return json.dumps({"uuid": uuid})
+    return {"uuid": uuid}
 
 
 @mcp.tool()
 def pcb_move_footprint(
     file_path: str, reference: str, x: float, y: float, rotation: float | None = None
-) -> str:
+) -> dict:
     """Move an existing footprint to a new position.
 
     Args:
@@ -566,7 +625,7 @@ def pcb_move_footprint(
     Returns whether the footprint was found and moved.
     """
     found = pcb.move_footprint(file_path, reference, x, y, rotation)
-    return json.dumps({"moved": found})
+    return {"moved": found}
 
 
 @mcp.tool()
@@ -576,7 +635,7 @@ def pcb_add_trace(
     layer: str,
     width: float,
     points: list[list[float]],
-) -> str:
+) -> dict:
     """Add copper trace segments between points.
 
     Args:
@@ -590,7 +649,7 @@ def pcb_add_trace(
     """
     pts = [(p[0], p[1]) for p in points]
     uuid = pcb.add_trace(file_path, net_name, layer, width, pts)
-    return json.dumps({"uuid": uuid})
+    return {"uuid": uuid}
 
 
 @mcp.tool()
@@ -601,7 +660,7 @@ def pcb_add_via(
     y: float,
     size: float = 0.8,
     drill: float = 0.4,
-) -> str:
+) -> dict:
     """Add a via at a position.
 
     Args:
@@ -615,7 +674,7 @@ def pcb_add_via(
     Returns the UUID of the via.
     """
     uuid = pcb.add_via(file_path, net_name, x, y, size, drill)
-    return json.dumps({"uuid": uuid})
+    return {"uuid": uuid}
 
 
 @mcp.tool()
@@ -625,7 +684,7 @@ def pcb_add_zone(
     layer: str,
     outline_points: list[list[float]],
     fill_type: str = "solid",
-) -> str:
+) -> dict:
     """Add a copper zone/pour.
 
     Args:
@@ -633,17 +692,17 @@ def pcb_add_zone(
         net_name: Net name for the zone (e.g., "GND").
         layer: Copper layer (e.g., "B.Cu").
         outline_points: List of [x, y] coordinate pairs defining the zone boundary.
-        fill_type: Fill type (default "solid").
+        fill_type: "solid" (default) or "hatch".
 
     Returns the UUID of the zone.
     """
     pts = [(p[0], p[1]) for p in outline_points]
     uuid = pcb.add_zone(file_path, net_name, layer, pts, fill_type)
-    return json.dumps({"uuid": uuid})
+    return {"uuid": uuid}
 
 
 @mcp.tool()
-def pcb_set_board_outline(file_path: str, outline_points: list[list[float]]) -> str:
+def pcb_set_board_outline(file_path: str, outline_points: list[list[float]]) -> dict:
     """Set the board outline on the Edge.Cuts layer.
 
     Args:
@@ -654,13 +713,13 @@ def pcb_set_board_outline(file_path: str, outline_points: list[list[float]]) -> 
     """
     pts = [(p[0], p[1]) for p in outline_points]
     ok = pcb.set_board_outline(file_path, pts)
-    return json.dumps({"success": ok})
+    return {"success": ok}
 
 
 @mcp.tool()
 def pcb_assign_net_to_pad(
     file_path: str, footprint_ref: str, pad_number: str, net_name: str
-) -> str:
+) -> dict:
     """Assign a net to a specific pad on a footprint.
 
     Args:
@@ -672,26 +731,29 @@ def pcb_assign_net_to_pad(
     Returns whether the pad was found and updated.
     """
     ok = pcb.assign_net_to_pad(file_path, footprint_ref, pad_number, net_name)
-    return json.dumps({"assigned": ok})
+    return {"assigned": ok}
 
 
 @mcp.tool()
 def pcb_add_mounting_hole(
-    file_path: str, x: float, y: float, drill_size: float = 3.2, pad_size: float = 6.0
-) -> str:
-    """Add a mounting hole footprint.
+    file_path: str, x: float, y: float, drill_size: float = 3.2, pad_size: float | None = None
+) -> dict:
+    """Add a plated mounting hole footprint (references H1, H2, ...).
+
+    Uses KiCad's MountingHole library footprint when one matches (a 3.2 mm
+    drill gives MountingHole_3.2mm_M3_Pad), otherwise generates one.
 
     Args:
         file_path: Path to the .kicad_pcb file.
         x: X position in mm.
         y: Y position in mm.
         drill_size: Drill diameter in mm (default 3.2).
-        pad_size: Pad diameter in mm (default 6.0).
+        pad_size: Pad diameter in mm (default: the library footprint's, or 2x drill).
 
     Returns the UUID of the mounting hole.
     """
     uuid = pcb.add_mounting_hole(file_path, x, y, drill_size, pad_size)
-    return json.dumps({"uuid": uuid})
+    return {"uuid": uuid}
 
 
 @mcp.tool()
@@ -711,7 +773,7 @@ def pcb_place_footprint_array(
     rotation: float = 0,
     layer: str = "F.Cu",
     start_index: int = 1,
-) -> str:
+) -> dict:
     """Place an array of identical footprints in a grid or circular pattern.
 
     Args:
@@ -739,11 +801,11 @@ def pcb_place_footprint_array(
         pattern, start_x, start_y, spacing_x, spacing_y, columns,
         radius, rotation, layer, start_index,
     )
-    return json.dumps({"uuids": uuids, "count": len(uuids)})
+    return {"uuids": uuids, "count": len(uuids)}
 
 
 @mcp.tool()
-def pcb_set_zone_net(file_path: str, zone_uuid: str, net_name: str) -> str:
+def pcb_set_zone_net(file_path: str, zone_uuid: str, net_name: str) -> dict:
     """Assign a net to an existing copper zone.
 
     Args:
@@ -755,17 +817,17 @@ def pcb_set_zone_net(file_path: str, zone_uuid: str, net_name: str) -> str:
     """
     logger.info("pcb_set_zone_net: zone %s -> %s", zone_uuid, net_name)
     ok = pcb.set_zone_net(file_path, zone_uuid, net_name)
-    return json.dumps({"updated": ok})
+    return {"updated": ok}
 
 
 @mcp.tool()
 def pcb_flip_footprint(
     file_path: str, reference: str, to_layer: str = "B.Cu"
-) -> str:
+) -> dict:
     """Flip a footprint to the opposite side of the board.
 
-    Swaps all layer references (F.Cu<->B.Cu, F.Mask<->B.Mask,
-    F.Paste<->B.Paste, F.SilkS<->B.SilkS, F.Fab<->B.Fab, F.CrtYd<->B.CrtYd).
+    Behaves like pressing F in KiCad: mirrors pads, graphics and text,
+    adjusts the orientation, and swaps all front/back layers.
 
     Args:
         file_path: Path to the .kicad_pcb file.
@@ -776,7 +838,7 @@ def pcb_flip_footprint(
     """
     logger.info("pcb_flip_footprint: %s -> %s", reference, to_layer)
     ok = pcb.flip_footprint(file_path, reference, to_layer)
-    return json.dumps({"flipped": ok})
+    return {"flipped": ok}
 
 
 @mcp.tool()
@@ -784,37 +846,38 @@ def pcb_autoroute(
     file_path: str,
     freerouting_jar: str | None = None,
     timeout: int = 300,
-    strategy: str = "auto",
-) -> str:
+    strategy: str = "freerouting",
+) -> dict:
     """Route a PCB automatically.
 
     Strategies:
-    - "auto" (default): Try Freerouting first, fall back to simple L-routing
-    - "freerouting": Use Freerouting only (requires pcbnew Python module + Java)
-    - "simple": L-shaped routing on F.Cu, GND pads via down to B.Cu ground plane
+    - "freerouting" (default): Freerouting (requires pcbnew Python module + Java).
+      Errors are reported; there is no silent fallback. "auto" is an alias.
+    - "simple": rough L-shaped routing with no obstacle avoidance. Expect DRC
+      errors; use it only as a starting point.
 
-    The simple router connects nets with L-shaped traces (horizontal then vertical).
-    GND pads get vias to the back copper pour. Power nets use 0.4mm traces,
-    signal nets use 0.25mm.
+    The simple router chains each net's pads with L-shaped tracks on a layer
+    both pads reach. If a GND zone exists, surface-mount GND pads get a short
+    stub and a via next to the pad. Power nets use 0.4mm tracks, signals 0.25mm.
 
     Args:
         file_path: Path to the .kicad_pcb file.
         freerouting_jar: Path to freerouting.jar (auto-downloaded if not specified).
         timeout: Max seconds for Freerouting (default 300).
-        strategy: "auto", "freerouting", or "simple".
+        strategy: "freerouting" or "simple".
 
     Returns status JSON with method used and routing statistics.
     """
     logger.info("pcb_autoroute: %s strategy=%s", file_path, strategy)
     result = pcb.autoroute(file_path, freerouting_jar, timeout, strategy)
     logger.info("pcb_autoroute: completed via %s", result.get("method", "unknown"))
-    return json.dumps(result)
+    return result
 
 
 @mcp.tool()
 def pcb_delete_footprint(
     file_path: str, reference: str | None = None, uuid: str | None = None
-) -> str:
+) -> dict:
     """Delete a footprint from the PCB by reference or UUID.
 
     Args:
@@ -825,7 +888,7 @@ def pcb_delete_footprint(
     Returns whether the footprint was found and deleted.
     """
     result = pcb.delete_footprint(file_path, reference=reference, target_uuid=uuid)
-    return json.dumps(result)
+    return result
 
 
 @mcp.tool()
@@ -833,7 +896,7 @@ def pcb_delete_footprints(
     file_path: str,
     references: list[str] | None = None,
     uuids: list[str] | None = None,
-) -> str:
+) -> dict:
     """Delete multiple footprints in a single operation.
 
     Args:
@@ -841,15 +904,15 @@ def pcb_delete_footprints(
         references: List of reference designators to delete.
         uuids: List of UUIDs to delete.
 
-    Returns list of results for each deletion attempt.
+    Returns one result per requested reference and UUID, plus deleted_count.
     """
     results = pcb.delete_footprints_batch(file_path, references, uuids)
     deleted_count = sum(1 for r in results if r.get("deleted"))
-    return json.dumps({"results": results, "deleted_count": deleted_count})
+    return {"results": results, "deleted_count": deleted_count}
 
 
 @mcp.tool()
-def pcb_delete_traces(file_path: str, uuids: list[str]) -> str:
+def pcb_delete_traces(file_path: str, uuids: list[str]) -> dict:
     """Delete multiple traces (segments) by UUID in a single operation.
 
     Args:
@@ -859,11 +922,11 @@ def pcb_delete_traces(file_path: str, uuids: list[str]) -> str:
     Returns list of booleans indicating which were found and deleted.
     """
     results = pcb.delete_elements_batch(file_path, uuids, element_type="segment")
-    return json.dumps({"results": results, "deleted_count": sum(results)})
+    return {"results": results, "deleted_count": sum(results)}
 
 
 @mcp.tool()
-def pcb_delete_vias(file_path: str, uuids: list[str]) -> str:
+def pcb_delete_vias(file_path: str, uuids: list[str]) -> dict:
     """Delete multiple vias by UUID in a single operation.
 
     Args:
@@ -873,18 +936,18 @@ def pcb_delete_vias(file_path: str, uuids: list[str]) -> str:
     Returns list of booleans indicating which were found and deleted.
     """
     results = pcb.delete_elements_batch(file_path, uuids, element_type="via")
-    return json.dumps({"results": results, "deleted_count": sum(results)})
+    return {"results": results, "deleted_count": sum(results)}
 
 
 @mcp.tool()
-def pcb_run_drc(file_path: str) -> str:
+def pcb_run_drc(file_path: str) -> dict:
     """Run Design Rules Check (DRC) on a PCB using kicad-cli.
 
-    Returns a list of violations with severity, message, and location.
+    Returns {violations: [{severity, message, location}], count}.
     Requires KiCad 8 to be installed.
     """
     violations = cli.run_drc(file_path)
-    return json.dumps([asdict(v) for v in violations], indent=2)
+    return {"violations": [asdict(v) for v in violations], "count": len(violations)}
 
 
 @mcp.tool()
@@ -893,7 +956,7 @@ def pcb_export_image(
     output_path: str,
     layers: list[str] | None = None,
     dpi: int = 300,
-) -> str:
+) -> dict:
     """Export a PCB image (SVG) for visual review.
 
     Args:
@@ -905,11 +968,11 @@ def pcb_export_image(
     Returns the output file path.
     """
     path = cli.export_pcb_image(file_path, output_path, layers, dpi)
-    return json.dumps({"output_path": path})
+    return {"output_path": path}
 
 
 @mcp.tool()
-def pcb_export_3d(file_path: str, output_path: str, format: str = "step") -> str:
+def pcb_export_3d(file_path: str, output_path: str, format: str = "step") -> dict:
     """Export 3D model of the PCB.
 
     Args:
@@ -920,11 +983,11 @@ def pcb_export_3d(file_path: str, output_path: str, format: str = "step") -> str
     Returns the output file path.
     """
     path = cli.export_3d(file_path, output_path, format)
-    return json.dumps({"output_path": path})
+    return {"output_path": path}
 
 
 @mcp.tool()
-def pcb_export_gerbers(file_path: str, output_dir: str) -> str:
+def pcb_export_gerbers(file_path: str, output_dir: str) -> dict:
     """Export Gerber and drill files for manufacturing.
 
     Args:
@@ -934,7 +997,7 @@ def pcb_export_gerbers(file_path: str, output_dir: str) -> str:
     Returns a list of generated file paths.
     """
     files = cli.export_gerbers(file_path, output_dir)
-    return json.dumps({"files": files})
+    return {"files": files}
 
 
 @mcp.tool()
@@ -943,16 +1006,18 @@ def pcb_export_manufacturing(
     output_dir: str,
     format: str = "jlcpcb",
     bom_path: str | None = None,
-) -> str:
+) -> dict:
     """Export all manufacturing files for a fab house in one call.
 
     Generates Gerbers, drill files, component placement (CPL), and BOM,
     then zips everything into manufacturing.zip.
 
     For JLCPCB format:
-    - CPL with columns: Designator, Mid X, Mid Y, Rotation, Layer
+    - CPL with columns: Designator, Mid X, Mid Y, Rotation, Layer, in the same
+      coordinate frame as the Gerbers
     - BOM with columns: Comment, Designator, Footprint, LCSC Part Number
-    - Y coordinates negated to match Gerber coordinate system
+
+    Only files written by this run are zipped; leftovers in output_dir are ignored.
 
     Args:
         file_path: Path to the .kicad_pcb file.
@@ -964,14 +1029,14 @@ def pcb_export_manufacturing(
     """
     logger.info("pcb_export_manufacturing: %s format=%s", file_path, format)
     result = cli.export_manufacturing(file_path, output_dir, format, bom_path)
-    return json.dumps(result)
+    return result
 
 
 # ── Utility Tools ────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def list_symbols(query: str) -> str:
+def list_symbols(query: str) -> dict:
     """Search KiCad's symbol libraries for a component.
 
     Args:
@@ -980,11 +1045,11 @@ def list_symbols(query: str) -> str:
     Returns a list of matching library symbol IDs.
     """
     results = library.list_library_symbols(query)
-    return json.dumps({"symbols": results})
+    return {"symbols": results}
 
 
 @mcp.tool()
-def list_footprints(query: str) -> str:
+def list_footprints(query: str) -> dict:
     """Search KiCad's footprint libraries.
 
     Args:
@@ -993,7 +1058,7 @@ def list_footprints(query: str) -> str:
     Returns a list of matching library footprint IDs.
     """
     results = library.list_library_footprints(query)
-    return json.dumps({"footprints": results})
+    return {"footprints": results}
 
 
 @mcp.tool()
@@ -1005,182 +1070,39 @@ def get_netlist(schematic_path: str) -> str:
     Args:
         schematic_path: Path to the .kicad_sch file.
 
-    Returns the netlist XML content.
+    Returns the netlist in KiCad's S-expression netlist format.
     """
     import tempfile
     from pathlib import Path
 
-    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
-        output_path = f.name
-
-    try:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        output_path = str(Path(tmp_dir) / "netlist.net")
         cli.export_netlist(schematic_path, output_path)
-        content = Path(output_path).read_text()
-        return content
-    finally:
-        Path(output_path).unlink(missing_ok=True)
+        return Path(output_path).read_text(encoding="utf-8")
 
 
 @mcp.tool()
-def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> str:
+def sync_schematic_to_pcb(schematic_path: str, pcb_path: str) -> dict:
     """Update PCB from schematic: nets, footprints, and pad net assignments.
 
     Exports a netlist from the schematic via kicad-cli, then:
     1. Adds missing net declarations to the PCB
     2. Places missing footprints (spaced out for manual arrangement)
-    3. Updates pad-to-net assignments on all existing footprints to match the netlist
+    3. Updates pad-to-net assignments on all footprints to match the netlist
+
+    If kicad-cli is unavailable it falls back to reading the schematic, which
+    can add footprints but not pad nets; "netlist_source" and "warnings" in
+    the result say when that happened.
 
     Args:
         schematic_path: Path to the .kicad_sch file.
         pcb_path: Path to the .kicad_pcb file.
 
-    Returns a summary of changes made.
+    Returns a summary: added_nets (only newly declared ones), added_footprints,
+    skipped_footprints (with reasons), updated_pads, netlist_source.
     """
-    import tempfile
-    import xml.etree.ElementTree as ET
-    from pathlib import Path
-
-    from .sexp_parser import parse_file, write_file
-
     logger.info("sync_schematic_to_pcb: %s -> %s", schematic_path, pcb_path)
-
-    components: list[dict] = []  # {ref, value, footprint}
-    pin_nets: dict[tuple[str, str], str] = {}  # (ref, pin) -> net_name
-    net_names: set[str] = set()
-
-    try:
-        # Use XML format — includes connected power nets (+3V3, +5V, etc.)
-        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
-            netlist_path = f.name
-        cli.export_netlist(schematic_path, netlist_path, fmt="kicadxml")
-        tree = ET.parse(netlist_path)
-        root_xml = tree.getroot()
-
-        # Extract components
-        for comp in root_xml.iter("comp"):
-            ref = comp.get("ref", "")
-            if not ref or ref.startswith("#"):
-                continue
-            value_el = comp.find("value")
-            fp_el = comp.find("footprint")
-            components.append({
-                "ref": ref,
-                "value": value_el.text if value_el is not None and value_el.text else "",
-                "footprint": fp_el.text if fp_el is not None and fp_el.text else "",
-            })
-
-        # Extract nets with pin assignments
-        for net_el in root_xml.iter("net"):
-            name = net_el.get("name", "")
-            if not name:
-                continue
-            net_names.add(name)
-            for node in net_el.findall("node"):
-                ref = node.get("ref", "")
-                pin = node.get("pin", "")
-                if ref and pin:
-                    pin_nets[(ref, pin)] = name
-
-        Path(netlist_path).unlink(missing_ok=True)
-    except Exception as e:
-        logger.warning("kicad-cli netlist export failed (%s), falling back to schematic parse", e)
-        sch_data = schematic.read_schematic(schematic_path)
-        for sym in sch_data.symbols:
-            if sym.reference and not sym.reference.startswith("#") and sym.footprint:
-                components.append({
-                    "ref": sym.reference,
-                    "value": sym.value,
-                    "footprint": sym.footprint,
-                })
-
-    # Supplement with power net names from schematic power symbols.
-    # The netlist export omits unconnected power nets (e.g., GND if no
-    # wires are connected yet), but we still want them declared in the PCB.
-    try:
-        sch_data = schematic.read_schematic(schematic_path)
-        for sym in sch_data.symbols:
-            if sym.lib_id.startswith("power:") and sym.value:
-                net_names.add(sym.value)
-    except Exception:
-        pass
-
-    # Update PCB
-    if not Path(pcb_path).exists():
-        root = pcb._make_empty_pcb()
-        write_file(pcb_path, root)
-
-    root = parse_file(pcb_path)
-
-    # 1. Add missing net declarations
-    added_nets: list[str] = []
-    for name in sorted(net_names):
-        pcb._ensure_net(root, name)
-        added_nets.append(name)
-
-    write_file(pcb_path, root)
-
-    # 2. Place missing footprints
-    pcb_data = pcb.read_pcb(pcb_path)
-    existing_refs = {fp.reference for fp in pcb_data.footprints}
-
-    added_fps: list[str] = []
-    x_offset = 50.0
-    for comp in components:
-        if comp["ref"] not in existing_refs and comp["footprint"]:
-            pcb.place_footprint(
-                pcb_path, comp["footprint"], comp["ref"], comp["value"],
-                x_offset, 50, 0, "F.Cu",
-            )
-            added_fps.append(comp["ref"])
-            x_offset += 10.0
-
-    # 3. Update pad net assignments on all footprints
-    updated_pads = 0
-    if pin_nets:
-        from .sexp_parser import QuotedString, escape_sexp_string as _esc, parse as _parse
-
-        # Re-read the PCB after footprint additions
-        root = parse_file(pcb_path)
-
-        for fp_node in root.find_all("footprint"):
-            fp_ref = ""
-            for prop in fp_node.find_all("property"):
-                if len(prop.children) >= 3 and str(prop.children[1]) == "Reference":
-                    fp_ref = str(prop.children[2])
-                    break
-
-            if not fp_ref:
-                continue
-
-            for pad_node in fp_node.find_all("pad"):
-                if len(pad_node.children) < 2:
-                    continue
-                pad_num = str(pad_node.children[1])
-                target_net = pin_nets.get((fp_ref, pad_num))
-                if target_net is None:
-                    continue
-
-                net_num = pcb._ensure_net(root, target_net)
-
-                # Always set the pad net to match the netlist
-                net_node = pad_node.find("net")
-                if net_node:
-                    net_node.children = ["net", net_num, QuotedString(target_net)]
-                else:
-                    pad_node.children.append(
-                        _parse(f'(net {net_num} "{_esc(target_net)}")')
-                    )
-                updated_pads += 1
-
-        write_file(pcb_path, root)
-
-    return json.dumps({
-        "added_nets": added_nets,
-        "added_footprints": added_fps,
-        "updated_pads": updated_pads,
-        "total_components": len(components),
-        "total_pin_net_mappings": len(pin_nets),
-    })
+    return pcb.sync_from_schematic(schematic_path, pcb_path)
 
 
 # ── JLCPCB Tools ────────────────────────────────────────────────────────────
@@ -1192,7 +1114,7 @@ def search_jlcpcb_parts(
     category: str | None = None,
     in_stock: bool = True,
     limit: int = 30,
-) -> str:
+) -> dict:
     """Search JLCPCB parts catalog. No authentication needed.
 
     Args:
@@ -1201,31 +1123,31 @@ def search_jlcpcb_parts(
         in_stock: Only show in-stock parts (default True).
         limit: Max results (default 30).
 
-    Returns JSON array of parts with LCSC number, manufacturer, package, stock, price.
+    Returns {parts: [...], count} with LCSC number, manufacturer, package, stock, price.
     """
     logger.info("search_jlcpcb_parts: %s", query)
     parts = jlcpcb.search_parts(query, category, in_stock, limit)
-    return json.dumps([asdict(p) for p in parts], indent=2)
+    return {"parts": [asdict(p) for p in parts], "count": len(parts)}
 
 
 @mcp.tool()
-def get_jlcpcb_part(lcsc_number: str) -> str:
+def get_jlcpcb_part(lcsc_number: str) -> dict:
     """Get details for a specific JLCPCB part by LCSC number.
 
     Args:
         lcsc_number: LCSC part number (e.g., "C21190" or "21190").
 
-    Returns JSON part details or null if not found.
+    Returns {part: {...}} or {part: null} if not found.
     """
     part = jlcpcb.get_part(lcsc_number)
-    return json.dumps(asdict(part) if part else None, indent=2)
+    return {"part": asdict(part) if part else None}
 
 
 @mcp.tool()
-def list_jlcpcb_categories() -> str:
+def list_jlcpcb_categories() -> dict:
     """List available JLCPCB part categories for filtering searches."""
     cats = jlcpcb.list_categories()
-    return json.dumps(cats, indent=2)
+    return {"categories": cats}
 
 
 # ── Server entry point ──────────────────────────────────────────────────────
@@ -1241,7 +1163,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
-    logger.info("KiCad MCP server starting (52 tools registered)")
+    logger.info("KiCad MCP server starting")
     mcp.run()
 
 

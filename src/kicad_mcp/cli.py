@@ -226,7 +226,9 @@ def export_gerbers(file_path: str, output_dir: str) -> list[str]:
     if not cli:
         raise RuntimeError("kicad-cli not found.")
 
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    before = _dir_snapshot(out)
 
     # Export gerbers
     cmd = [cli, "pcb", "export", "gerbers", "--output", output_dir + "/", file_path]
@@ -240,7 +242,14 @@ def export_gerbers(file_path: str, output_dir: str) -> list[str]:
     if result.returncode != 0:
         raise RuntimeError(f"Drill export failed: {result.stderr.strip()}")
 
-    return sorted(str(p) for p in Path(output_dir).iterdir() if p.is_file())
+    # Only report files this run wrote, not leftovers already in the folder
+    after = _dir_snapshot(out)
+    return sorted(str(out / name) for name, stamp in after.items() if before.get(name) != stamp)
+
+
+def _dir_snapshot(directory: Path) -> dict[str, int]:
+    """Map file name -> modification time (ns) for files directly in directory."""
+    return {p.name: p.stat().st_mtime_ns for p in directory.iterdir() if p.is_file()}
 
 
 def export_position_file(
@@ -296,8 +305,11 @@ def export_manufacturing(
     pos_path = str(out / "positions.csv")
     export_position_file(file_path, pos_path, fmt="csv", units="mm")
 
-    generated_files = list(gerber_files) + [pos_path]
+    generated_files = [f for f in gerber_files if Path(f).name != "manufacturing.zip"]
+    generated_files.append(pos_path)
 
+    if fmt not in ("jlcpcb", "pcbway", "raw"):
+        raise ValueError(f"Unknown format {fmt!r}; use 'jlcpcb', 'pcbway' or 'raw'.")
     if fmt == "raw":
         return {"files": generated_files, "zip_path": None}
 
@@ -313,14 +325,16 @@ def export_manufacturing(
         _generate_bom(bom_path, bom_out_path, fmt)
         generated_files.append(bom_out_path)
 
-    # 4. Zip everything
-    zip_path = str(out / "manufacturing.zip")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fpath in generated_files:
+    # 4. Zip this run's files (each once, never a previous zip)
+    zip_path = out / "manufacturing.zip"
+    to_zip = [f for f in dict.fromkeys(generated_files) if Path(f).resolve() != zip_path.resolve()]
+    tmp_zip = out / ".manufacturing.zip.tmp"
+    with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fpath in to_zip:
             zf.write(fpath, Path(fpath).name)
-    generated_files.append(zip_path)
+    tmp_zip.replace(zip_path)
 
-    return {"files": generated_files, "zip_path": zip_path}
+    return {"files": to_zip + [str(zip_path)], "zip_path": str(zip_path)}
 
 
 def _generate_cpl(
@@ -331,9 +345,9 @@ def _generate_cpl(
     KiCad's position CSV has columns: Ref, Val, Package, PosX, PosY, Rot, Side
     Output columns: Designator, Mid X, Mid Y, Rotation, Layer
 
-    Transformations (keep it simple — only negate Y):
-    - X: raw value, no mirroring for bottom components
-    - Y: negated (KiCad Y-down -> Gerber Y-up)
+    Coordinates are passed through unchanged: kicad-cli already writes the
+    position file in the Gerber frame (Y up, so boards drawn below the
+    origin get negative Y), which is what the fab matches against.
     - Rotation: raw KiCad value, no correction (JLCPCB preview handles alignment)
     - Units: mm suffix on coordinates
     """
@@ -353,9 +367,8 @@ def _generate_cpl(
             rot = row.get("Rot", row.get("rot", row.get("Rotation", "0")))
             side = row.get("Side", row.get("side", row.get("Layer", "top")))
 
-            # JLCPCB/PCBWay: negate Y to match Gerber coordinates
             try:
-                y_val = -float(pos_y.strip())
+                y_val = float(pos_y.strip())
             except (ValueError, AttributeError):
                 y_val = 0.0
 
@@ -514,7 +527,6 @@ def import_ses(pcb_path: str, ses_path: str) -> str:
         f"board.Save({pcb_path!r}); "
         f"print('ok')"
     )
-    board.Save(pcb_path)
     return pcb_path
 
 

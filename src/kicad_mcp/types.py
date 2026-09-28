@@ -28,6 +28,8 @@ class SymbolInstance:
     position: Point
     rotation: float
     pins: list[PinInfo] = field(default_factory=list)
+    unit: int = 1
+    mirror: str | None = None  # None, "x" or "y"
 
 
 @dataclass
@@ -53,7 +55,8 @@ class PadInfo:
     number: str
     net_number: int
     net_name: str
-    position: Point
+    position: Point  # relative to the footprint origin, unrotated
+    absolute_position: Point | None = None  # board coordinates
 
 
 @dataclass
