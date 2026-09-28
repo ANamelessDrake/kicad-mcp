@@ -559,12 +559,26 @@ def flip_footprint(file_path: str, reference: str, to_layer: str = "B.Cu") -> bo
 _LIBRARY_ONLY_TAGS = frozenset({"version", "generator", "generator_version"})
 
 
-def _load_footprint_from_disk(footprint_lib: str) -> SexpList | None:
-    """Load a footprint definition from KiCad's installed library files."""
+def _regenerate_child_uuids(node: SexpList) -> None:
+    """Give every item nested inside a footprint a fresh UUID."""
+    for child in node.children:
+        if not isinstance(child, SexpList):
+            continue
+        uuid_node = child.find("uuid")
+        if uuid_node and len(uuid_node.children) >= 2:
+            uuid_node.children[1] = QuotedString(_new_uuid())
+        if child.tag != "uuid":
+            _regenerate_child_uuids(child)
+
+
+def _load_footprint_from_disk(
+    footprint_lib: str, project_dir: Path | None = None,
+) -> SexpList | None:
+    """Load a footprint definition from the project or installed library files."""
     if ":" not in footprint_lib:
         return None
     lib_name, fp_name = footprint_lib.split(":", 1)
-    fp_root = library.load_footprint(lib_name, fp_name)
+    fp_root = library.load_footprint(lib_name, fp_name, project_dir)
     if fp_root is None or fp_root.tag not in ("footprint", "module"):
         return None
     fp_root.children[0] = "footprint"
@@ -587,15 +601,20 @@ def _place_footprint_in_root(
     rotation: float = 0,
     layer: str = "F.Cu",
     fp_node: SexpList | None = None,
+    project_dir: Path | None = None,
 ) -> str:
-    """Place a footprint into a parsed board tree. Returns the UUID."""
+    """Place a footprint into a parsed board tree. Returns the UUID.
+
+    project_dir is the board's directory, used to resolve libraries in the
+    project's fp-lib-table.
+    """
     if layer not in ("F.Cu", "B.Cu"):
         raise ValueError("layer must be 'F.Cu' or 'B.Cu'.")
     if _find_footprint(root, reference) is not None:
         raise ValueError(f"A footprint with reference {reference!r} already exists.")
 
     if fp_node is None:
-        fp_node = _load_footprint_from_disk(footprint_lib)
+        fp_node = _load_footprint_from_disk(footprint_lib, project_dir)
     if fp_node is None:
         raise ValueError(
             f"Footprint {footprint_lib!r} not found in the KiCad footprint libraries "
@@ -603,6 +622,10 @@ def _place_footprint_in_root(
         )
 
     fp_uuid = _new_uuid()
+
+    # Library items carry fixed UUIDs; two copies of one footprint would
+    # otherwise share pad UUIDs. pcbnew gives every placed item a new one.
+    _regenerate_child_uuids(fp_node)
 
     layer_node = fp_node.find("layer")
     if layer_node:
@@ -656,7 +679,10 @@ def place_footprint(
     reference is already used.
     """
     root = _load_or_create(file_path)
-    fp_uuid = _place_footprint_in_root(root, footprint_lib, reference, value, x, y, rotation, layer)
+    fp_uuid = _place_footprint_in_root(
+        root, footprint_lib, reference, value, x, y, rotation, layer,
+        project_dir=Path(file_path).parent,
+    )
     write_file(file_path, root)
     return fp_uuid
 
@@ -971,6 +997,7 @@ def place_footprint_array(
         ref = f"{reference_prefix}{start_index + i}"
         uuids.append(_place_footprint_in_root(
             root, footprint_lib, ref, value, x, y, fp_rotation, layer,
+            project_dir=Path(file_path).parent,
         ))
 
     write_file(file_path, root)
@@ -1441,6 +1468,7 @@ def sync_from_schematic(schematic_path: str, pcb_path: str) -> dict:
         try:
             _place_footprint_in_root(
                 root, comp["footprint"], comp["ref"], comp["value"], x_offset, 50, 0, "F.Cu",
+                project_dir=Path(pcb_path).parent,
             )
         except ValueError as e:
             skipped.append({"ref": comp["ref"], "reason": str(e)})

@@ -193,7 +193,46 @@ def load_symbol(lib_name: str, symbol_name: str) -> SexpList | None:
     return target
 
 
-def load_footprint(lib_name: str, fp_name: str) -> SexpList | None:
-    """Return a copy of a .kicad_mod footprint, or None if not found."""
-    root = _load_cached(footprint_dir() / f"{lib_name}.pretty" / f"{fp_name}.kicad_mod")
-    return copy.deepcopy(root) if root is not None else None
+_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def project_footprint_lib_dir(lib_name: str, project_dir: Path) -> Path | None:
+    """Resolve a library nickname through the project's fp-lib-table.
+
+    ${KIPRJMOD} expands to the project directory; other ${VAR} references
+    expand from the environment. Returns None if the table has no such entry.
+    """
+    table = _load_cached(project_dir / "fp-lib-table")
+    if table is None:
+        return None
+    for lib in table.find_all("lib"):
+        name, uri = lib.find("name"), lib.find("uri")
+        if not name or not uri or str(name.children[1]) != lib_name:
+            continue
+        env = {"KIPRJMOD": str(project_dir)}
+
+        def expand(m: re.Match) -> str:
+            return env.get(m.group(1)) or os.environ.get(m.group(1)) or m.group(0)
+
+        path = Path(_ENV_REF_RE.sub(expand, str(uri.children[1])))
+        return path if path.is_absolute() else project_dir / path
+    return None
+
+
+def load_footprint(lib_name: str, fp_name: str, project_dir: Path | None = None) -> SexpList | None:
+    """Return a copy of a .kicad_mod footprint, or None if not found.
+
+    With project_dir, the project's fp-lib-table is searched before the
+    global footprint directory, as KiCad does.
+    """
+    lib_dirs = []
+    if project_dir is not None:
+        project_lib = project_footprint_lib_dir(lib_name, project_dir)
+        if project_lib is not None:
+            lib_dirs.append(project_lib)
+    lib_dirs.append(footprint_dir() / f"{lib_name}.pretty")
+    for lib_dir in lib_dirs:
+        root = _load_cached(lib_dir / f"{fp_name}.kicad_mod")
+        if root is not None:
+            return copy.deepcopy(root)
+    return None

@@ -1,6 +1,7 @@
 """Tests for PCB operations."""
 
 import os
+import re
 import shutil
 import tempfile
 
@@ -453,3 +454,45 @@ class TestSyncFromSchematic:
         assert result["updated_pads"] == 0
         assert "pad nets were not updated" in result["warnings"][0]
         assert result["added_footprints"] == ["R1"]
+
+
+class TestProjectFootprintLibrary:
+    def _make_project_lib(self, tmp_dir):
+        lib = os.path.join(tmp_dir, "proj.pretty")
+        os.makedirs(lib)
+        with open(os.path.join(lib, "Pads2.kicad_mod"), "w") as f:
+            f.write(
+                '(footprint "Pads2" (version 20240108) (generator "pcbnew") (layer "F.Cu")\n'
+                '  (property "Reference" "REF**" (at 0 -2 0) (layer "F.SilkS"))\n'
+                '  (property "Value" "Pads2" (at 0 2 0) (layer "F.Fab"))\n'
+                '  (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask")'
+                ' (uuid "11111111-1111-1111-1111-111111111111"))\n'
+                '  (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask")'
+                ' (uuid "22222222-2222-2222-2222-222222222222"))\n'
+                ')\n'
+            )
+        with open(os.path.join(tmp_dir, "fp-lib-table"), "w") as f:
+            f.write(
+                '(fp_lib_table\n  (version 7)\n'
+                '  (lib (name "proj")(type "KiCad")(uri "${KIPRJMOD}/proj.pretty")(options "")(descr ""))\n)\n'
+            )
+
+    def test_place_from_project_library(self, sample_pcb, tmp_dir):
+        self._make_project_lib(tmp_dir)
+        place_footprint(sample_pcb, "proj:Pads2", "J1", "pads", 10, 10)
+        fp = next(f for f in read_pcb(sample_pcb).footprints if f.reference == "J1")
+        assert sorted(p.number for p in fp.pads) == ["1", "2"]
+
+    def test_copies_get_distinct_pad_uuids(self, sample_pcb, tmp_dir):
+        self._make_project_lib(tmp_dir)
+        place_footprint_array(sample_pcb, "proj:Pads2", "J", "pads", count=2)
+        with open(sample_pcb) as f:
+            text = f.read()
+        assert "11111111-1111-1111-1111-111111111111" not in text
+        uuids = re.findall(r'\(uuid "([^"]+)"\)', text)
+        assert len(uuids) == len(set(uuids))
+
+    def test_unknown_project_library_still_raises(self, sample_pcb, tmp_dir):
+        self._make_project_lib(tmp_dir)
+        with pytest.raises(ValueError):
+            place_footprint(sample_pcb, "proj:Missing", "J1", "x", 0, 0)
