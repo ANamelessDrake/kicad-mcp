@@ -653,6 +653,12 @@ def _place_footprint_in_root(
                 prop.children[2] = QuotedString(reference)
             elif str(prop.children[1]) == "Value":
                 prop.children[2] = QuotedString(value)
+    for text in fp_node.find_all("fp_text"):  # KiCad 7 and older libraries
+        if len(text.children) >= 3:
+            if str(text.children[1]) == "reference":
+                text.children[2] = QuotedString(reference)
+            elif str(text.children[1]) == "value":
+                text.children[2] = QuotedString(value)
 
     # Library footprints are drawn on the front; flip first, then orient.
     if layer == "B.Cu":
@@ -1012,6 +1018,8 @@ def autoroute(
     freerouting_jar: str | None = None,
     timeout: int = 300,
     strategy: str = "freerouting",
+    max_passes: int = 20,
+    ignore_net_classes: list[str] | None = None,
 ) -> dict:
     """Route a PCB.
 
@@ -1029,7 +1037,8 @@ def autoroute(
 
     if strategy in ("freerouting", "auto"):
         try:
-            return _autoroute_freerouting(file_path, freerouting_jar, timeout)
+            return _autoroute_freerouting(file_path, freerouting_jar, timeout,
+                                          max_passes, ignore_net_classes)
         except RuntimeError as e:
             raise RuntimeError(
                 f"Freerouting failed: {e} The board was not modified. "
@@ -1041,18 +1050,40 @@ def autoroute(
 
 
 def _autoroute_freerouting(
-    file_path: str, freerouting_jar: str | None, timeout: int
+    file_path: str,
+    freerouting_jar: str | None,
+    timeout: int,
+    max_passes: int = 20,
+    ignore_net_classes: list[str] | None = None,
 ) -> dict:
-    """Route using Freerouting (requires pcbnew Python module + Java)."""
+    """Route using Freerouting (requires pcbnew Python module + Java).
+
+    The DSN is exported from a copy of the board without copper zones: KiCad
+    exports zones as Specctra planes, which Freerouting treats as obstacles
+    for every other net. The routed session is imported into the real board,
+    whose zones are left in place (refill them afterwards).
+    """
+    import shutil
     import tempfile
     from . import cli as kicad_cli
 
+    src = Path(file_path)
     with tempfile.TemporaryDirectory() as tmp_dir:
-        dsn_path = str(Path(tmp_dir) / "board.dsn")
-        ses_path = str(Path(tmp_dir) / "board.ses")
+        tmp = Path(tmp_dir)
+        copy = tmp / src.name
+        for sibling in (src, src.with_suffix(".kicad_pro"), src.with_suffix(".kicad_dru"),
+                        src.parent / "fp-lib-table"):
+            if sibling.exists():
+                shutil.copy2(sibling, tmp / sibling.name)
+        root = parse_file(str(copy))
+        root.children = [c for c in root.children if not (isinstance(c, SexpList) and c.tag == "zone")]
+        write_file(str(copy), root)
 
-        kicad_cli.export_dsn(file_path, dsn_path)
-        kicad_cli.run_freerouting(dsn_path, ses_path, freerouting_jar, timeout)
+        dsn_path = str(tmp / "board.dsn")
+        ses_path = str(tmp / "board.ses")
+        kicad_cli.export_dsn(str(copy), dsn_path)
+        kicad_cli.run_freerouting(dsn_path, ses_path, freerouting_jar, timeout,
+                                  max_passes, ignore_net_classes)
         kicad_cli.import_ses(file_path, ses_path)
 
     return {"status": "success", "method": "freerouting", "file": file_path}
@@ -1445,7 +1476,7 @@ def sync_from_schematic(schematic_path: str, pcb_path: str) -> dict:
     # The netlist omits unconnected power nets (e.g. GND before any wires),
     # but they should still be declared in the PCB.
     for sym in sch_data.symbols:
-        if sym.lib_id.startswith("power:") and sym.value:
+        if sym.lib_id.startswith("power:") and sym.value and sym.lib_id != "power:PWR_FLAG":
             net_names.add(sym.value)
 
     root = _load_or_create(pcb_path)

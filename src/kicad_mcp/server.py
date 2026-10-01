@@ -13,7 +13,7 @@ from dataclasses import asdict
 
 from mcp.server.fastmcp import FastMCP
 
-from . import cli, jlcpcb, library, pcb, schematic
+from . import cli, jlcpcb, library, pcb, project, schematic
 
 
 def _configure_logging() -> logging.Logger:
@@ -805,6 +805,132 @@ def pcb_place_footprint_array(
 
 
 @mcp.tool()
+def project_list_net_classes(file_path: str) -> dict:
+    """List net classes and their net-name patterns from the project file.
+
+    Args:
+        file_path: Path to the .kicad_pro, .kicad_pcb or .kicad_sch file.
+
+    Returns {classes: [{name, clearance, track_width, via_diameter, via_drill, ...}],
+    patterns: [{netclass, pattern}]}.
+    """
+    return project.list_net_classes(file_path)
+
+
+@mcp.tool()
+def project_set_net_class(
+    file_path: str,
+    name: str,
+    nets: list[str] | None = None,
+    clearance: float | None = None,
+    track_width: float | None = None,
+    via_diameter: float | None = None,
+    via_drill: float | None = None,
+) -> dict:
+    """Create or update a net class and assign nets to it (mm).
+
+    A new class starts as a copy of Default. Nets are matched by exact name
+    (as they appear on the board, e.g. "/VBAT", "GND") and removed from other
+    classes. Passing nets replaces the class's list; omitting it keeps it.
+    Freerouting and DRC use these widths and clearances.
+
+    Args:
+        file_path: Path to the .kicad_pro, .kicad_pcb or .kicad_sch file.
+        name: Net class name (e.g. "Power").
+        nets: Net names to assign to this class.
+        clearance, track_width, via_diameter, via_drill: Values in mm.
+
+    Returns the class settings and its nets.
+    """
+    logger.info("project_set_net_class: %s nets=%s", name, nets)
+    return project.set_net_class(
+        file_path, name, nets, clearance, track_width, via_diameter, via_drill,
+    )
+
+
+@mcp.tool()
+def project_set_design_rules(file_path: str, rules: dict[str, float]) -> dict:
+    """Set board-wide constraints (KiCad Board Setup > Constraints), in mm.
+
+    Valid keys: min_clearance, min_connection, min_copper_edge_clearance,
+    min_hole_clearance, min_hole_to_hole, min_microvia_diameter,
+    min_microvia_drill, min_resolved_spokes, min_silk_clearance,
+    min_text_height, min_text_thickness, min_through_hole_diameter,
+    min_track_width, min_via_annular_width, min_via_diameter,
+    solder_mask_to_copper_clearance.
+
+    Args:
+        file_path: Path to the .kicad_pro, .kicad_pcb or .kicad_sch file.
+        rules: Mapping of rule key to value.
+
+    Returns the full set of stored constraints.
+    """
+    logger.info("project_set_design_rules: %s", rules)
+    return project.set_design_rules(file_path, rules)
+
+
+@mcp.tool()
+def project_set_custom_rules(file_path: str, rules: str) -> dict:
+    """Write the project's custom DRC rules file (<project>.kicad_dru).
+
+    Uses KiCad's custom rule syntax; replaces the whole file. Example:
+    (rule "U1 thermal vias" (condition "A.memberOfFootprint('U1')")
+      (constraint hole_size (min 0.2mm)))
+    Board constraints set with project_set_design_rules are hard floors that
+    rules cannot go below: to allow a smaller value for one part, lower the
+    floor and add a rule restoring it elsewhere, e.g.
+    (condition "!A.memberOfFootprint('U1')") (constraint hole_size (min 0.3mm)).
+
+    Args:
+        file_path: Path to the .kicad_pro, .kicad_pcb or .kicad_sch file.
+        rules: Rule definitions; "(version 1)" is prepended if missing.
+
+    Returns the path written.
+    """
+    logger.info("project_set_custom_rules")
+    return {"path": project.set_custom_rules(file_path, rules)}
+
+
+@mcp.tool()
+def pcb_fill_zones(file_path: str) -> dict:
+    """Fill all copper zones using KiCad's zone filler and save the board.
+
+    Zone outlines added with pcb_add_zone have no copper until filled. Run
+    this before DRC or Gerber export (pcb_export_manufacturing refills
+    automatically). Requires the pcbnew Python module (KiCad 8).
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+
+    Returns {filled_zones: count}.
+    """
+    logger.info("pcb_fill_zones: %s", file_path)
+    return cli.fill_zones(file_path)
+
+
+@mcp.tool()
+def pcb_set_copper_layers(
+    file_path: str, count: int, power_layers: list[str] | None = None,
+) -> dict:
+    """Set the copper layer count (2, 4, 6, ...) and mark power-plane layers.
+
+    Uses KiCad's pcbnew API, which also writes the layer table and stackup.
+    Layers in power_layers (e.g. ["In1.Cu"]) become type "power": Freerouting
+    keeps signal traces off them and lets vias pass through. Add a zone on
+    that layer (pcb_add_zone) for the plane itself. Requires pcbnew (KiCad 8).
+
+    Args:
+        file_path: Path to the .kicad_pcb file.
+        count: Number of copper layers (even, >= 2).
+        power_layers: Inner layers to mark as power planes.
+
+    Returns {copper_layers, power_layers}.
+    """
+    logger.info("pcb_set_copper_layers: %s count=%s power=%s", file_path, count, power_layers)
+    return cli.set_copper_layers(file_path, count, power_layers)
+
+
+@mcp.tool()
 def pcb_set_zone_net(file_path: str, zone_uuid: str, net_name: str) -> dict:
     """Assign a net to an existing copper zone.
 
@@ -847,6 +973,8 @@ def pcb_autoroute(
     freerouting_jar: str | None = None,
     timeout: int = 300,
     strategy: str = "freerouting",
+    max_passes: int = 20,
+    ignore_net_classes: list[str] | None = None,
 ) -> dict:
     """Route a PCB automatically.
 
@@ -865,11 +993,17 @@ def pcb_autoroute(
         freerouting_jar: Path to freerouting.jar (auto-downloaded if not specified).
         timeout: Max seconds for Freerouting (default 300).
         strategy: "freerouting" or "simple".
+        max_passes: Freerouting optimisation passes (default 20).
+        ignore_net_classes: Net classes Freerouting leaves unrouted, e.g.
+            ["GND"] when pours and stitching vias connect ground. Copper
+            zones are removed from the exported DSN automatically (Freerouting
+            treats them as obstacles); refill zones after routing.
 
     Returns status JSON with method used and routing statistics.
     """
     logger.info("pcb_autoroute: %s strategy=%s", file_path, strategy)
-    result = pcb.autoroute(file_path, freerouting_jar, timeout, strategy)
+    result = pcb.autoroute(file_path, freerouting_jar, timeout, strategy,
+                           max_passes, ignore_net_classes)
     logger.info("pcb_autoroute: completed via %s", result.get("method", "unknown"))
     return result
 
@@ -1006,6 +1140,7 @@ def pcb_export_manufacturing(
     output_dir: str,
     format: str = "jlcpcb",
     bom_path: str | None = None,
+    exclude_refs: list[str] | None = None,
 ) -> dict:
     """Export all manufacturing files for a fab house in one call.
 
@@ -1024,11 +1159,19 @@ def pcb_export_manufacturing(
         output_dir: Output directory for all manufacturing files.
         format: "jlcpcb" (default), "pcbway", or "raw" (Gerbers + drill only).
         bom_path: Optional path to a BOM CSV with LCSC part numbers.
+        exclude_refs: Designators to leave out of the CPL and BOM (bare wire
+            pads, hand-soldered parts).
 
-    Returns JSON with list of generated files and zip path.
+    Copper zones are refilled (and the board saved) before plotting. The BOM
+    only lists parts present in the CPL; through-hole parts, which the position
+    file omits, are reported in bom_dropped. Rows without an LCSC number are
+    reported in bom_missing_lcsc.
+
+    Returns JSON with generated files, zip path, bom_dropped, bom_missing_lcsc.
     """
     logger.info("pcb_export_manufacturing: %s format=%s", file_path, format)
-    result = cli.export_manufacturing(file_path, output_dir, format, bom_path)
+    result = cli.export_manufacturing(file_path, output_dir, format, bom_path,
+                                      exclude_refs=exclude_refs)
     return result
 
 

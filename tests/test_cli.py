@@ -60,3 +60,32 @@ def test_manufacturing_export_is_repeatable(tmp_path):
     assert "stale-from-other-board.gbr" not in names
     assert sorted(names) == sorted(os.path.basename(f) for f in first["files"][:-1])
     assert second["files"][-1] == second["zip_path"]
+
+
+def test_bom_limited_to_placed_parts_and_excludes(tmp_path):
+    from kicad_mcp.cli import _generate_bom, _generate_cpl
+    pos = tmp_path / "pos.csv"
+    pos.write_text(
+        "Ref,Val,Package,PosX,PosY,Rot,Side\n"
+        "R1,10k,R_0402,1.0,-2.0,0,top\n"
+        "R2,10k,R_0402,3.0,-2.0,0,top\n"
+        "J7,pads,MotorPads,5.0,-2.0,0,top\n"
+    )
+    cpl = tmp_path / "cpl.csv"
+    placed = _generate_cpl(str(pos), str(cpl), "jlcpcb", {"J7"})
+    assert placed == {"R1", "R2"}
+    assert "J7" not in cpl.read_text()
+
+    bom_in = tmp_path / "bom_in.csv"
+    bom_in.write_text(
+        "Reference,Value,Footprint,LCSC\n"
+        '"R1,R2",10k,R_0402,C25744\n'
+        "J2,XT30,XT30PB,C915486\n"
+        "C9,1uF,C_0402,\n"
+    )
+    bom_out = tmp_path / "bom.csv"
+    report = _generate_bom(str(bom_in), str(bom_out), "jlcpcb", placed)
+    text = bom_out.read_text()
+    assert "R1,R2" in text and "J2" not in text
+    assert report["bom_dropped"] == ["C9", "J2"]
+    assert report["bom_missing_lcsc"] == []

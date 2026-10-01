@@ -496,3 +496,17 @@ class TestProjectFootprintLibrary:
         self._make_project_lib(tmp_dir)
         with pytest.raises(ValueError):
             place_footprint(sample_pcb, "proj:Missing", "J1", "x", 0, 0)
+
+    def test_kicad7_fp_text_reference_is_set(self, sample_pcb, tmp_dir):
+        self._make_project_lib(tmp_dir)
+        mod = os.path.join(tmp_dir, "proj.pretty", "Old.kicad_mod")
+        with open(mod, "w") as f:
+            f.write(
+                '(footprint "Old" (layer "F.Cu")\n'
+                '  (fp_text reference "REF**" (at 0 -2) (layer "F.SilkS"))\n'
+                '  (fp_text value "Old" (at 0 2) (layer "F.Fab"))\n'
+                '  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))\n)\n'
+            )
+        place_footprint(sample_pcb, "proj:Old", "J5", "legacy", 0, 0)
+        refs = [f.reference for f in read_pcb(sample_pcb).footprints]
+        assert "J5" in refs and "REF**" not in refs
